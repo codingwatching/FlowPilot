@@ -29,8 +29,8 @@ describe('memory system', () => {
   });
 
   it('appendMemory deduplicates similar entries (similarity>0.8)', async () => {
-    await appendMemory(dir, { content: 'use PostgreSQL database for user data storage', source: 'task-001', timestamp: '2025-01-01T00:00:00Z' });
-    await appendMemory(dir, { content: 'use PostgreSQL database for user data storage layer', source: 'task-002', timestamp: '2025-01-02T00:00:00Z' });
+    await appendMemory(dir, { content: 'use PostgreSQL database for user data storage design', source: 'task-001', timestamp: '2025-01-01T00:00:00Z' });
+    await appendMemory(dir, { content: 'use PostgreSQL database for user data storage design', source: 'task-002', timestamp: '2025-01-02T00:00:00Z' });
     const entries = await loadMemory(dir);
     expect(entries).toHaveLength(1);
     expect(entries[0].source).toBe('task-002');
@@ -73,7 +73,7 @@ describe('memory system', () => {
 describe('TF-IDF tokenize (via appendMemory dedup)', () => {
   it('CJK bigram: near-identical CJK texts deduplicate', async () => {
     await appendMemory(dir, { content: '数据库设计方案确定', source: 't1', timestamp: '2025-01-01T00:00:00Z' });
-    await appendMemory(dir, { content: '数据库设计方案确定了', source: 't2', timestamp: '2025-01-02T00:00:00Z' });
+    await appendMemory(dir, { content: '数据库设计方案确定', source: 't2', timestamp: '2025-01-02T00:00:00Z' });
     const entries = await loadMemory(dir);
     expect(entries).toHaveLength(1);
   });
