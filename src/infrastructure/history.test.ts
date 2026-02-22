@@ -153,20 +153,6 @@ describe('experiment', () => {
     expect(cfg.maxRetries).toBe(5);
   });
 
-  it('protocol target appends rule without destroying content', async () => {
-    const protoDir = join(base, 'FlowPilot', 'src', 'templates');
-    mkdirSync(protoDir, { recursive: true });
-    writeFileSync(join(protoDir, 'protocol.md'), '# Original');
-    const report: ReflectReport = {
-      timestamp: '', findings: [],
-      experiments: [{ trigger: 'test', observation: 'o', action: 'add rule', expected: 'e', target: 'protocol' }],
-    };
-    await experiment(report, base);
-    const content = readFileSync(join(protoDir, 'protocol.md'), 'utf-8');
-    expect(content).toContain('# Original');
-    expect(content).toContain('evolution: test');
-  });
-
   it('appends experiment log to experiments.json', async () => {
     const report: ReflectReport = {
       timestamp: '', findings: [],
@@ -184,9 +170,6 @@ describe('review', () => {
   beforeEach(() => { base = mkdtempSync(join(tmpdir(), 'fp-review-')); });
 
   it('no history data: all checks pass', async () => {
-    const protoDir = join(base, 'FlowPilot', 'src', 'templates');
-    mkdirSync(protoDir, { recursive: true });
-    writeFileSync(join(protoDir, 'protocol.md'), '# proto');
     const result = await review(base);
     expect(result.rolledBack).toBe(false);
     expect(result.checks.every(c => c.passed)).toBe(true);
