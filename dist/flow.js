@@ -293,6 +293,7 @@ echo '\u6458\u8981 [REMEMBER] \u5173\u952E\u77E5\u8BC6\u70B9 [DECISION] \u91CD\u
 2. When finish returns "\u9A8C\u8BC1\u901A\u8FC7\uFF0C\u8BF7\u6D3E\u5B50Agent\u6267\u884C code-review" \u2192 dispatch a sub-agent to run /code-review:code-review. Fix issues if any.
 3. Run \`node flow.js review\` to mark code-review done.
 4. **AI \u53CD\u601D\uFF08\u8FDB\u5316\u5F15\u64CE\uFF09**: dispatch a sub-agent to analyze the workflow. Sub-agent MUST:
+   - **MUST invoke /superpowers:brainstorming FIRST** \u2014 \u4EE5\u5934\u8111\u98CE\u66B4\u65B9\u5F0F\u591A\u7EF4\u5EA6\u53CD\u601D\u672C\u8F6E\u5DE5\u4F5C\u6D41\uFF08\u6210\u529F\u6A21\u5F0F\u3001\u5931\u8D25\u6839\u56E0\u3001\u4F18\u5316\u673A\u4F1A\u3001\u67B6\u6784\u6D1E\u5BDF\uFF09\u3002Skipping = protocol failure.
    - Read \`.flowpilot/history/\` files to understand workflow stats
    - Read \`.flowpilot/evolution/\` files to see past experiments
    - Analyze: what went well, what could improve, config optimization opportunities
