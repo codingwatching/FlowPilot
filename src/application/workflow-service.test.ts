@@ -149,10 +149,10 @@ describe('WorkflowService 集成测试', () => {
     await svc.init(TASKS_MD);
     await svc.next();
     // 记忆内容包含"页面"关键词，与任务002"创建页面"匹配
-    await svc.checkpoint('001', '[REMEMBER] 创建页面时使用React组件模式');
+    await svc.checkpoint('001', '[REMEMBER] 创建页面时使用React组件化架构模式，支持动态路由和状态管理');
     const r = await svc.next();
     expect(r?.context).toContain('相关记忆');
-    expect(r?.context).toContain('React组件模式');
+    expect(r?.context).toContain('React组件化架构模式');
   });
 
   it('nextBatch注入相关永久记忆到context', async () => {
