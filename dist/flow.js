@@ -938,7 +938,8 @@ async function callClaude(prompt, systemPrompt) {
   const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN;
   if (!apiKey) return null;
   const baseUrl = process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com";
-  const parsed = new URL("/v1/messages", baseUrl);
+  const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+  const parsed = new URL(base + "/v1/messages");
   return new Promise((resolve2) => {
     const body = JSON.stringify({
       model: "claude-haiku-4-5-20251001",

@@ -18,7 +18,8 @@ export async function callClaude(prompt: string, systemPrompt: string): Promise<
   if (!apiKey) return null;
 
   const baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
-  const parsed = new URL('/v1/messages', baseUrl);
+  const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  const parsed = new URL(base + '/v1/messages');
 
   return new Promise((resolve) => {
     const body = JSON.stringify({
