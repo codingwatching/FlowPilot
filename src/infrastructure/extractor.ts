@@ -14,8 +14,11 @@ export interface ExtractedEntry {
 
 /** 调用 Claude API（零外部依赖，使用内置 https） */
 export async function callClaude(prompt: string, systemPrompt: string): Promise<string | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN;
   if (!apiKey) return null;
+
+  const baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+  const parsed = new URL('/v1/messages', baseUrl);
 
   return new Promise((resolve) => {
     const body = JSON.stringify({
@@ -26,8 +29,9 @@ export async function callClaude(prompt: string, systemPrompt: string): Promise<
     });
 
     const req = request({
-      hostname: 'api.anthropic.com',
-      path: '/v1/messages',
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: parsed.pathname,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

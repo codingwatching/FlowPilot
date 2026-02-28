@@ -935,8 +935,10 @@ async function runLifecycleHook(hookName, basePath2, env) {
 // src/infrastructure/extractor.ts
 var import_https = require("https");
 async function callClaude(prompt, systemPrompt) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN;
   if (!apiKey) return null;
+  const baseUrl = process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com";
+  const parsed = new URL("/v1/messages", baseUrl);
   return new Promise((resolve2) => {
     const body = JSON.stringify({
       model: "claude-haiku-4-5-20251001",
@@ -945,8 +947,9 @@ async function callClaude(prompt, systemPrompt) {
       messages: [{ role: "user", content: prompt }]
     });
     const req = (0, import_https.request)({
-      hostname: "api.anthropic.com",
-      path: "/v1/messages",
+      hostname: parsed.hostname,
+      port: parsed.port || void 0,
+      path: parsed.pathname,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
