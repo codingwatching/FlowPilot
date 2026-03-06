@@ -270,7 +270,7 @@ export class FsWorkflowRepository implements WorkflowRepository {
   }
 
   commit(taskId: string, title: string, summary: string, files?: string[]): CommitResult {
-    return autoCommit(taskId, title, summary, files);
+    return autoCommit(taskId, title, summary, files, this.base);
   }
 
   cleanup(): void {

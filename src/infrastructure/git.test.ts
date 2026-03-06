@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -101,6 +101,38 @@ describe('git runtime path filtering', () => {
       expect(listChangedFiles(rootDir)).toEqual(['vendor/lib/tracked.txt']);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('commits from repo base even when process cwd differs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'flow-git-cwd-'));
+    const outsideDir = await mkdtemp(join(tmpdir(), 'flow-git-outside-'));
+
+    try {
+      execFileSync('git', ['init'], { cwd: dir, stdio: 'pipe' });
+      execFileSync('git', ['config', 'user.name', 'FlowPilot Test'], { cwd: dir, stdio: 'pipe' });
+      execFileSync('git', ['config', 'user.email', 'flowpilot@example.com'], { cwd: dir, stdio: 'pipe' });
+
+      await writeFile(join(dir, 'tracked.txt'), 'base\n', 'utf-8');
+      execFileSync('git', ['add', '--', 'tracked.txt'], { cwd: dir, stdio: 'pipe' });
+      execFileSync('git', ['commit', '-m', 'init'], { cwd: dir, stdio: 'pipe' });
+
+      await writeFile(join(dir, 'tracked.txt'), 'base\nchanged\n', 'utf-8');
+
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(outsideDir);
+      try {
+        const repo = new FsWorkflowRepository(dir);
+        expect(repo.listChangedFiles()).toEqual(['tracked.txt']);
+        expect(repo.commit('finish', '跨目录提交', 'repoRoot should win', repo.listChangedFiles())).toEqual({ status: 'committed' });
+      } finally {
+        cwdSpy.mockRestore();
+      }
+
+      expect(execFileSync('git', ['status', '--short'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim()).toBe('');
+      expect(execFileSync('git', ['log', '-1', '--pretty=%s'], { cwd: dir, stdio: 'pipe', encoding: 'utf-8' }).trim()).toBe('task-finish: 跨目录提交');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
     }
   });
 });

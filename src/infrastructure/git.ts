@@ -168,9 +168,9 @@ export const __testables = {
 };
 
 /** 为任务打轻量 tag，返回错误信息或null */
-export function tagTask(taskId: string): string | null {
+export function tagTask(taskId: string, cwd = process.cwd()): string | null {
   try {
-    execFileSync('git', ['tag', `flowpilot/task-${taskId}`], { stdio: 'pipe' });
+    execFileSync('git', ['tag', `flowpilot/task-${taskId}`], { stdio: 'pipe', cwd });
     return null;
   } catch (e: any) {
     return e.stderr?.toString?.() || e.message;
@@ -178,34 +178,34 @@ export function tagTask(taskId: string): string | null {
 }
 
 /** 回滚到指定任务的 tag，使用 git revert */
-export function rollbackToTask(taskId: string): string | null {
+export function rollbackToTask(taskId: string, cwd = process.cwd()): string | null {
   const tag = `flowpilot/task-${taskId}`;
   try {
-    execFileSync('git', ['rev-parse', tag], { stdio: 'pipe' });
-    const log = execFileSync('git', ['log', '--oneline', `${tag}..HEAD`], { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    execFileSync('git', ['rev-parse', tag], { stdio: 'pipe', cwd });
+    const log = execFileSync('git', ['log', '--oneline', `${tag}..HEAD`], { stdio: 'pipe', cwd, encoding: 'utf-8' }).trim();
     if (!log) return '没有需要回滚的提交';
-    execFileSync('git', ['revert', '--no-commit', `${tag}..HEAD`], { stdio: 'pipe' });
-    execFileSync('git', ['commit', '-m', `rollback: revert to task-${taskId}`], { stdio: 'pipe' });
+    execFileSync('git', ['revert', '--no-commit', `${tag}..HEAD`], { stdio: 'pipe', cwd });
+    execFileSync('git', ['commit', '-m', `rollback: revert to task-${taskId}`], { stdio: 'pipe', cwd });
     return null;
   } catch (e: any) {
-    try { execFileSync('git', ['revert', '--abort'], { stdio: 'pipe' }); } catch {}
+    try { execFileSync('git', ['revert', '--abort'], { stdio: 'pipe', cwd }); } catch {}
     return e.stderr?.toString?.() || e.message;
   }
 }
 
 /** 清理所有 flowpilot/ 前缀的 tag */
-export function cleanTags(): void {
+export function cleanTags(cwd = process.cwd()): void {
   try {
-    const tags = execFileSync('git', ['tag', '-l', 'flowpilot/*'], { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const tags = execFileSync('git', ['tag', '-l', 'flowpilot/*'], { stdio: 'pipe', cwd, encoding: 'utf-8' }).trim();
     if (!tags) return;
     for (const t of tags.split('\n')) {
-      if (t) execFileSync('git', ['tag', '-d', t], { stdio: 'pipe' });
+      if (t) execFileSync('git', ['tag', '-d', t], { stdio: 'pipe', cwd });
     }
   } catch {}
 }
 
 /** 自动 git add + commit，返回真实提交结果 */
-export function autoCommit(taskId: string, title: string, summary: string, files?: string[]): CommitResult {
+export function autoCommit(taskId: string, title: string, summary: string, files?: string[], cwd = process.cwd()): CommitResult {
   const msg = `task-${taskId}: ${title}
 
 ${summary}`;
@@ -214,9 +214,9 @@ ${summary}`;
   const commitFiles = filterCommitFiles(files);
   if (!commitFiles.length) return skipped('runtime-only');
 
-  const submodules = getSubmodules();
+  const submodules = getSubmodules(cwd);
   if (!submodules.length) {
-    return commitIn(process.cwd(), commitFiles, msg);
+    return commitIn(cwd, commitFiles, msg);
   }
 
   const groups = groupBySubmodule(commitFiles, submodules);
@@ -224,14 +224,14 @@ ${summary}`;
 
   for (const [sub, subFiles] of groups) {
     if (!sub) continue;
-    results.push(commitIn(sub, subFiles, msg));
+    results.push(commitIn(join(cwd, sub), subFiles, msg));
   }
 
   const parentFiles = groups.get('') ?? [];
   const touchedSubs = [...groups.keys()].filter(k => k !== '');
   const parentTargets = [...touchedSubs, ...parentFiles];
   if (parentTargets.length) {
-    results.push(commitIn(process.cwd(), parentTargets, msg));
+    results.push(commitIn(cwd, parentTargets, msg));
   }
 
   const failures = results.filter((result): result is CommitResult & { status: 'failed'; error: string } => result.status === 'failed' && Boolean(result.error));
