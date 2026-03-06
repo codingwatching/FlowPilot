@@ -220,6 +220,19 @@ describe('WorkflowService 集成测试', () => {
     expect(msg).not.toContain('[已自动提交]');
   });
 
+  it('checkpoint在未提供文件时明确提示未自动提交原因', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    mockCommitResult(repo, { status: 'skipped', reason: 'no-files' });
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await svc.init(TASKS_MD);
+    await svc.next();
+
+    const msg = await svc.checkpoint('001', '表结构设计完成');
+    expect(msg).toContain('[未自动提交]');
+    expect(msg).toContain('未提供 --files，未自动提交');
+    expect(msg).not.toContain('[已自动提交]');
+  });
+
   it('finish在未提供文件时说明未提交最终commit但仍正常收尾', async () => {
     const repo = new FsWorkflowRepository(dir);
     mockCommitResult(repo, { status: 'skipped', reason: 'no-files' });

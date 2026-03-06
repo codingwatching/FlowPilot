@@ -132,6 +132,28 @@ describe('FsWorkflowRepository', () => {
     expect(settings.hooks.PreToolUse).toHaveLength(3);
   });
 
+  it('ensureHooks 保留已有配置并仅补齐缺失 hooks', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
+      model: 'opus',
+      hooks: {
+        PreToolUse: [
+          { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'existing task create hook' }] },
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'keep me' }] },
+        ],
+      },
+    }, null, 2), 'utf-8');
+
+    const wrote = await repo.ensureHooks();
+    expect(wrote).toBe(true);
+
+    const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
+    const preToolUse = settings.hooks.PreToolUse as Array<{ matcher: string }>;
+    expect(settings.model).toBe('opus');
+    expect(preToolUse.map(entry => entry.matcher)).toEqual(['TaskCreate', 'OtherTool', 'TaskUpdate', 'TaskList']);
+    expect(preToolUse.filter(entry => entry.matcher === 'TaskCreate')).toHaveLength(1);
+  });
+
   it('lock/unlock 基本流程', async () => {
     await repo.lock();
     await repo.unlock();

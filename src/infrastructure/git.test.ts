@@ -24,6 +24,10 @@ describe('git runtime path filtering', () => {
     expect(autoCommit('001', 'test', 'summary')).toEqual({ status: 'skipped', reason: 'no-files' });
   });
 
+  it('returns skipped/no-files when files list is empty', () => {
+    expect(autoCommit('001', 'test', 'summary', [])).toEqual({ status: 'skipped', reason: 'no-files' });
+  });
+
   it('returns skipped/runtime-only when only runtime files are provided', () => {
     expect(autoCommit('001', 'test', 'summary', [
       '.workflow/progress.md',
