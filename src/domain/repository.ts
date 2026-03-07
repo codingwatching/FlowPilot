@@ -42,6 +42,7 @@ export interface WorkflowRepository {
   ensureClaudeMd(): Promise<boolean>;
   /** 确保.claude/settings.json包含hooks */
   ensureHooks(): Promise<boolean>;
+  ensureClaudeWorktreesIgnored(): Promise<boolean>;
   /** 清理 context/ 目录（finish后释放上下文） */
   clearContext(): Promise<void>;
   /** 清理整个 .workflow/ 目录 */
@@ -65,9 +66,9 @@ export interface WorkflowRepository {
   saveHistory(stats: WorkflowStats): Promise<void>;
   /** 加载所有历史统计 */
   loadHistory(): Promise<WorkflowStats[]>;
-  /** 加载 .workflow/config.json */
+  /** 加载 .flowpilot/config.json，兼容从旧的 .workflow/config.json 迁移 */
   loadConfig(): Promise<Record<string, unknown>>;
-  /** 保存 .workflow/config.json */
+  /** 保存 .flowpilot/config.json */
   saveConfig(config: Record<string, unknown>): Promise<void>;
   /** 为任务打轻量 tag，返回错误信息或null */
   tag(taskId: string): string | null;

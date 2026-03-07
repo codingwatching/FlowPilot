@@ -1,6 +1,6 @@
 /**
  * @module infrastructure/fs-repository
- * @description 文件系统仓储 - 基于 .workflow/ 目录的分层记忆存储
+ * @description 文件系统仓储 - 基于 .workflow/.flowpilot 目录的分层记忆存储
  */
 
 import { mkdir, readFile, writeFile, unlink, rm, rename, readdir } from 'fs/promises';
@@ -12,14 +12,35 @@ import { autoCommit, gitCleanup, tagTask, rollbackToTask, cleanTags as gitCleanT
 import { runVerify } from './verify';
 import { PROTOCOL_TEMPLATE } from './protocol-template';
 
-/** 读取协议模板：优先 .workflow/config.json 的 protocolTemplate，其次内置模板 */
-async function loadProtocolTemplate(basePath: string): Promise<string> {
+const PERSISTENT_DIR = '.flowpilot';
+const LEGACY_RUNTIME_DIR = '.workflow';
+const CONFIG_FILE = 'config.json';
+
+async function readConfigFile(path: string): Promise<Record<string, unknown> | null> {
   try {
-    const config = JSON.parse(await readFile(join(basePath, '.workflow', 'config.json'), 'utf-8'));
-    if (config.protocolTemplate) {
-      return await readFile(join(basePath, config.protocolTemplate), 'utf-8');
-    }
-  } catch {}
+    const parsed = JSON.parse(await readFile(path, 'utf-8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+async function readPersistedConfig(basePath: string): Promise<Record<string, unknown> | null> {
+  const currentConfig = await readConfigFile(join(basePath, PERSISTENT_DIR, CONFIG_FILE));
+  if (currentConfig) return currentConfig;
+  return readConfigFile(join(basePath, LEGACY_RUNTIME_DIR, CONFIG_FILE));
+}
+
+/** 读取协议模板：优先 .flowpilot/config.json，兼容旧的 .workflow/config.json */
+async function loadProtocolTemplate(basePath: string): Promise<string> {
+  const config = await readPersistedConfig(basePath);
+  const protocolTemplate = config?.protocolTemplate;
+  if (typeof protocolTemplate === 'string' && protocolTemplate.length > 0) {
+    try {
+      return await readFile(join(basePath, protocolTemplate), 'utf-8');
+    } catch {}
+  }
   return PROTOCOL_TEMPLATE;
 }
 
@@ -28,14 +49,16 @@ export class FsWorkflowRepository implements WorkflowRepository {
   private readonly ctxDir: string;
   private readonly historyDir: string;
   private readonly evolutionDir: string;
+  private readonly configDir: string;
   private readonly base: string;
 
   constructor(basePath: string) {
     this.base = basePath;
-    this.root = join(basePath, '.workflow');
+    this.root = join(basePath, LEGACY_RUNTIME_DIR);
     this.ctxDir = join(this.root, 'context');
-    this.historyDir = join(basePath, '.flowpilot', 'history');
-    this.evolutionDir = join(basePath, '.flowpilot', 'evolution');
+    this.configDir = join(basePath, PERSISTENT_DIR);
+    this.historyDir = join(basePath, PERSISTENT_DIR, 'history');
+    this.evolutionDir = join(basePath, PERSISTENT_DIR, 'evolution');
   }
 
   projectRoot(): string { return this.base; }
@@ -265,6 +288,27 @@ export class FsWorkflowRepository implements WorkflowRepository {
     return true;
   }
 
+  async ensureClaudeWorktreesIgnored(): Promise<boolean> {
+    const path = join(this.base, '.gitignore');
+    const rule = '.claude/worktrees/';
+
+    try {
+      const content = await readFile(path, 'utf-8');
+      const hasRule = content.split(/\r?\n/).some(line => line.trimEnd() === rule);
+      if (hasRule) return false;
+
+      const nextContent = content.length === 0
+        ? `${rule}\n`
+        : `${content}${content.endsWith('\n') ? '' : '\n'}${rule}\n`;
+      await writeFile(path, nextContent, 'utf-8');
+      return true;
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') throw error;
+      await writeFile(path, `${rule}\n`, 'utf-8');
+      return true;
+    }
+  }
+
   listChangedFiles(): string[] {
     return gitListChangedFiles(this.base);
   }
@@ -305,19 +349,24 @@ export class FsWorkflowRepository implements WorkflowRepository {
     }
   }
 
-  // --- .workflow/config.json ---
+  // --- .flowpilot/config.json（兼容读取旧的 .workflow/config.json） ---
 
   async loadConfig(): Promise<Record<string, unknown>> {
-    try {
-      return JSON.parse(await readFile(join(this.root, 'config.json'), 'utf-8'));
-    } catch {
-      return {};
-    }
+    const currentConfig = await readConfigFile(join(this.configDir, CONFIG_FILE));
+    if (currentConfig) return currentConfig;
+
+    const legacyConfig = await readConfigFile(join(this.root, CONFIG_FILE));
+    if (!legacyConfig) return {};
+
+    await this.saveConfig(legacyConfig);
+    return legacyConfig;
   }
 
   async saveConfig(config: Record<string, unknown>): Promise<void> {
-    await this.ensure(this.root);
-    await writeFile(join(this.root, 'config.json'), JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    await this.ensure(this.configDir);
+    const path = join(this.configDir, CONFIG_FILE);
+    await writeFile(path + '.tmp', JSON.stringify(config, null, 2) + '\n', 'utf-8');
+    await rename(path + '.tmp', path);
   }
 
   /** 清理注入的 CLAUDE.md 协议块；运行期不回写 .claude/* */

@@ -56,6 +56,40 @@ describe('FsWorkflowRepository', () => {
     expect(await repo.loadSummary()).toBe('# 摘要');
   });
 
+  it('ensureClaudeWorktreesIgnored 创建缺失的 .gitignore', async () => {
+    const changed = await repo.ensureClaudeWorktreesIgnored();
+
+    expect(changed).toBe(true);
+    expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe('.claude/worktrees/\n');
+  });
+
+  it('ensureClaudeWorktreesIgnored 追加规则且不覆盖原内容', async () => {
+    await writeFile(join(dir, '.gitignore'), 'node_modules/\n', 'utf-8');
+
+    const changed = await repo.ensureClaudeWorktreesIgnored();
+
+    expect(changed).toBe(true);
+    expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe('node_modules/\n.claude/worktrees/\n');
+  });
+
+  it('ensureClaudeWorktreesIgnored 在无尾换行时正确追加', async () => {
+    await writeFile(join(dir, '.gitignore'), 'node_modules/', 'utf-8');
+
+    const changed = await repo.ensureClaudeWorktreesIgnored();
+
+    expect(changed).toBe(true);
+    expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe('node_modules/\n.claude/worktrees/\n');
+  });
+
+  it('ensureClaudeWorktreesIgnored 幂等且不重复追加规则', async () => {
+    await writeFile(join(dir, '.gitignore'), 'node_modules/\n.claude/worktrees/\n', 'utf-8');
+
+    const changed = await repo.ensureClaudeWorktreesIgnored();
+
+    expect(changed).toBe(false);
+    expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe('node_modules/\n.claude/worktrees/\n');
+  });
+
   it('ensureClaudeMd 首次创建', async () => {
     const wrote = await repo.ensureClaudeMd();
     expect(wrote).toBe(true);
@@ -74,6 +108,33 @@ describe('FsWorkflowRepository', () => {
     await repo.saveConfig({ verify: { timeout: 60 } });
     const cfg = await repo.loadConfig();
     expect(cfg.verify).toEqual({ timeout: 60 });
+    expect(await readFile(join(dir, '.flowpilot', 'config.json'), 'utf-8')).toContain('"timeout": 60');
+  });
+
+  it('loadConfig 兼容读取旧的 .workflow/config.json 并迁移到 .flowpilot', async () => {
+    await mkdir(join(dir, '.workflow'), { recursive: true });
+    await writeFile(
+      join(dir, '.workflow', 'config.json'),
+      JSON.stringify({ verify: { timeout: 30 }, maxRetries: 2 }, null, 2) + '\n',
+      'utf-8'
+    );
+
+    const cfg = await repo.loadConfig();
+
+    expect(cfg).toEqual({ verify: { timeout: 30 }, maxRetries: 2 });
+    expect(await readFile(join(dir, '.flowpilot', 'config.json'), 'utf-8')).toContain('"timeout": 30');
+    expect(await readFile(join(dir, '.workflow', 'config.json'), 'utf-8')).toContain('"timeout": 30');
+  });
+
+  it('clearAll 不删除持久配置', async () => {
+    await repo.saveProgress(makeData());
+    await repo.saveConfig({ parallelLimit: 4 });
+
+    await repo.clearAll();
+
+    expect(await repo.loadProgress()).toBeNull();
+    expect(await repo.loadConfig()).toEqual({ parallelLimit: 4 });
+    expect(existsSync(join(dir, '.flowpilot', 'config.json'))).toBe(true);
   });
 
   it('clearContext 清理 context 目录', async () => {
