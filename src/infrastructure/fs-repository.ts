@@ -16,6 +16,46 @@ const PERSISTENT_DIR = '.flowpilot';
 const LEGACY_RUNTIME_DIR = '.workflow';
 const CONFIG_FILE = 'config.json';
 
+const VALID_WORKFLOW_STATUS = new Set(['idle', 'running', 'finishing', 'completed', 'aborted']);
+const VALID_TASK_STATUS = new Set(['pending', 'active', 'done', 'skipped', 'failed']);
+
+/** 解析 progress.md 文本为工作流状态 */
+export function parseProgressMarkdown(raw: string): ProgressData {
+  const lines = raw.split('\n');
+  const name = (lines[0] ?? '').replace(/^#\s*/, '').trim();
+  let status = 'idle' as ProgressData['status'];
+  let current: string | null = null;
+  let startTime: string | undefined;
+  const tasks: TaskEntry[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith('状态: ')) {
+      const parsedStatus = line.slice(4).trim();
+      status = (VALID_WORKFLOW_STATUS.has(parsedStatus) ? parsedStatus : 'idle') as ProgressData['status'];
+    }
+    if (line.startsWith('当前: ')) current = line.slice(4).trim();
+    if (current === '无') current = null;
+    if (line.startsWith('开始: ')) startTime = line.slice(4).trim();
+
+    const matchedTask = line.match(/^\|\s*(\d{3,})\s*\|\s*(.+?)\s*\|\s*(\w+)\s*\|\s*([^|]*?)\s*\|\s*(\w+)\s*\|\s*(\d+)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|$/);
+    if (matchedTask) {
+      const depsRaw = matchedTask[4].trim();
+      tasks.push({
+        id: matchedTask[1],
+        title: matchedTask[2],
+        type: matchedTask[3] as TaskEntry['type'],
+        deps: depsRaw === '-' ? [] : depsRaw.split(',').map(dep => dep.trim()),
+        status: (VALID_TASK_STATUS.has(matchedTask[5]) ? matchedTask[5] : 'pending') as TaskEntry['status'],
+        retries: parseInt(matchedTask[6], 10),
+        summary: matchedTask[7] === '-' ? '' : matchedTask[7],
+        description: matchedTask[8] === '-' ? '' : matchedTask[8],
+      });
+    }
+  }
+
+  return { name, status, current, tasks, ...(startTime ? { startTime } : {}) };
+}
+
 async function readConfigFile(path: string): Promise<Record<string, unknown> | null> {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf-8'));
@@ -123,47 +163,10 @@ export class FsWorkflowRepository implements WorkflowRepository {
   async loadProgress(): Promise<ProgressData | null> {
     try {
       const raw = await readFile(join(this.root, 'progress.md'), 'utf-8');
-      return this.parseProgress(raw);
+      return parseProgressMarkdown(raw);
     } catch {
       return null;
     }
-  }
-
-  private parseProgress(raw: string): ProgressData {
-    const validWfStatus = new Set(['idle', 'running', 'finishing', 'completed', 'aborted']);
-    const validTaskStatus = new Set(['pending', 'active', 'done', 'skipped', 'failed']);
-    const lines = raw.split('\n');
-    const name = (lines[0] ?? '').replace(/^#\s*/, '').trim();
-    let status = 'idle' as ProgressData['status'];
-    let current: string | null = null;
-    let startTime: string | undefined;
-    const tasks: TaskEntry[] = [];
-
-    for (const line of lines) {
-      if (line.startsWith('状态: ')) {
-        const s = line.slice(4).trim();
-        status = (validWfStatus.has(s) ? s : 'idle') as ProgressData['status'];
-      }
-      if (line.startsWith('当前: ')) current = line.slice(4).trim();
-      if (current === '无') current = null;
-      if (line.startsWith('开始: ')) startTime = line.slice(4).trim();
-
-      const m = line.match(/^\|\s*(\d{3,})\s*\|\s*(.+?)\s*\|\s*(\w+)\s*\|\s*([^|]*?)\s*\|\s*(\w+)\s*\|\s*(\d+)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|$/);
-      if (m) {
-        const depsRaw = m[4].trim();
-        tasks.push({
-          id: m[1], title: m[2], type: m[3] as TaskEntry['type'],
-          deps: depsRaw === '-' ? [] : depsRaw.split(',').map(d => d.trim()),
-          status: (validTaskStatus.has(m[5]) ? m[5] : 'pending') as TaskEntry['status'],
-          retries: parseInt(m[6], 10),
-          summary: m[7] === '-' ? '' : m[7],
-          description: m[8] === '-' ? '' : m[8],
-        });
-      }
-    }
-
-    // 从 tasks.md 补充 deps 信息
-    return { name, status, current, tasks, ...(startTime ? { startTime } : {}) };
   }
 
   // --- context/ 任务详细产出 ---

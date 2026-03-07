@@ -8,7 +8,7 @@ import { loadMemory, loadDf, saveDf, rebuildDf, compactMemory } from './memory';
 import { loadWindow } from './loop-detector';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import type { ProgressData } from '../domain/types';
+import { parseProgressMarkdown } from './fs-repository';
 
 export interface ActiveHoursConfig {
   activeHoursStart?: number; // 0-23
@@ -48,15 +48,15 @@ export async function runHeartbeat(basePath: string, config?: ActiveHoursConfig)
 
   // 1. 活跃任务超时
   try {
-    const raw = await readFile(join(basePath, '.workflow', 'progress.json'), 'utf-8');
-    const data: ProgressData = JSON.parse(raw);
+    const raw = await readFile(join(basePath, '.workflow', 'progress.md'), 'utf-8');
+    const data = parseProgressMarkdown(raw);
     if (data.status === 'running') {
-      const active = data.tasks.filter(t => t.status === 'active');
+      const active = data.tasks.filter(task => task.status === 'active');
       if (active.length) {
         const window = await loadWindow(basePath);
         const lastTs = window.length ? new Date(window[window.length - 1].timestamp).getTime() : 0;
         if (lastTs && Date.now() - lastTs > TASK_TIMEOUT_MS) {
-          warnings.push(`[TIMEOUT] 任务 ${active.map(t => t.id).join(',')} 超过30分钟无checkpoint`);
+          warnings.push(`[TIMEOUT] 任务 ${active.map(task => task.id).join(',')} 超过30分钟无checkpoint`);
         }
       }
     }
