@@ -1,10 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, writeFile, mkdir } from 'fs/promises';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtemp, rm, readFile, writeFile, mkdir, utimes } from 'fs/promises';
+import * as fs from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
+import { tmpdir, hostname } from 'os';
 import { existsSync } from 'fs';
 import { FsWorkflowRepository } from './fs-repository';
 import type { ProgressData, WorkflowStats } from '../domain/types';
+
+vi.mock('fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return {
+    ...actual,
+    closeSync: vi.fn(actual.closeSync),
+    writeFileSync: vi.fn(actual.writeFileSync),
+  };
+});
 
 let dir: string;
 let repo: FsWorkflowRepository;
@@ -15,6 +25,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -218,8 +229,107 @@ describe('FsWorkflowRepository', () => {
   it('lock/unlock 基本流程', async () => {
     await repo.lock();
     await repo.unlock();
-    // 解锁后可以再次获取锁
     await repo.lock();
     await repo.unlock();
+  });
+
+  it('live-owner lock cannot be reclaimed after timeout', async () => {
+    const lockDir = join(dir, '.workflow');
+    const localityToken = (await readFile('/proc/sys/kernel/random/boot_id', 'utf-8')).trim();
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(join(lockDir, '.lock'), JSON.stringify({
+      pid: process.pid,
+      hostname: hostname(),
+      localityToken,
+      createdAt: new Date().toISOString(),
+    }), 'utf-8');
+
+    const otherRepo = new FsWorkflowRepository(dir);
+    await expect(otherRepo.lock(10)).rejects.toThrow(/锁.*pid/i);
+  });
+
+  it('same-host dead lock without locality proof cannot be reclaimed', async () => {
+    const lockDir = join(dir, '.workflow');
+    const lockPath = join(lockDir, '.lock');
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(lockPath, JSON.stringify({
+      pid: 999999,
+      hostname: hostname(),
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }), 'utf-8');
+
+    await expect(repo.lock(10)).rejects.toThrow(/安全回收条件|无法获取文件锁/);
+    expect(JSON.parse(await readFile(lockPath, 'utf-8'))).toMatchObject({ pid: 999999 });
+  });
+
+  it('stale lock with dead PID can be reclaimed when locality is provable', async () => {
+    const lockDir = join(dir, '.workflow');
+    const localityToken = (await readFile('/proc/sys/kernel/random/boot_id', 'utf-8')).trim();
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(join(lockDir, '.lock'), JSON.stringify({
+      pid: 999999,
+      hostname: hostname(),
+      localityToken,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    }), 'utf-8');
+
+    await repo.lock(10);
+
+    const payload = JSON.parse(await readFile(join(lockDir, '.lock'), 'utf-8')) as { pid: number; hostname: string; localityToken?: string };
+    expect(payload.pid).toBe(process.pid);
+    expect(payload.hostname).toBe(hostname());
+
+    await repo.unlock();
+  });
+
+  it('malformed lock payload can be treated as stale only after explicit validation failure', async () => {
+    const lockDir = join(dir, '.workflow');
+    const lockPath = join(lockDir, '.lock');
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(lockPath, '{bad json', 'utf-8');
+    const oldTime = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldTime, oldTime);
+
+    await repo.lock(10);
+
+    const payload = JSON.parse(await readFile(lockPath, 'utf-8')) as { pid: number };
+    expect(payload.pid).toBe(process.pid);
+
+    await repo.unlock();
+  });
+
+  it('unlock does not remove a lock owned by another PID', async () => {
+    const lockDir = join(dir, '.workflow');
+    const lockPath = join(lockDir, '.lock');
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(lockPath, JSON.stringify({
+      pid: process.pid + 1000,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    }), 'utf-8');
+
+    await repo.unlock();
+
+    expect(JSON.parse(await readFile(lockPath, 'utf-8'))).toMatchObject({ pid: process.pid + 1000 });
+  });
+
+  it('lock surfaces metadata write failures instead of treating them as contention', async () => {
+    const lockPath = join(dir, '.workflow', '.lock');
+    vi.mocked(fs.writeFileSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('disk full'), { code: 'EIO' });
+    });
+
+    await expect(repo.lock(10)).rejects.toThrow(/disk full/);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('lock surfaces close failures and removes the partial lock file', async () => {
+    const lockPath = join(dir, '.workflow', '.lock');
+    vi.mocked(fs.closeSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('close failed'), { code: 'EIO' });
+    });
+
+    await expect(repo.lock(10)).rejects.toThrow(/close failed/);
+    expect(existsSync(lockPath)).toBe(false);
   });
 });

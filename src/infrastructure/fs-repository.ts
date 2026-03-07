@@ -3,14 +3,24 @@
  * @description 文件系统仓储 - 基于 .workflow/.flowpilot 目录的分层记忆存储
  */
 
-import { mkdir, readFile, writeFile, unlink, rm, rename, readdir } from 'fs/promises';
+import { mkdir, readFile, writeFile, unlink, rm, rename, readdir, stat } from 'fs/promises';
 import { join } from 'path';
-import { openSync, closeSync } from 'fs';
+import { openSync, closeSync, writeFileSync } from 'fs';
+import { hostname } from 'os';
 import type { ProgressData, TaskEntry, WorkflowStats, EvolutionEntry } from '../domain/types';
 import type { WorkflowRepository, VerifyResult, CommitResult } from '../domain/repository';
 import { autoCommit, gitCleanup, tagTask, rollbackToTask, cleanTags as gitCleanTags, listChangedFiles as gitListChangedFiles } from './git';
 import { runVerify } from './verify';
 import { PROTOCOL_TEMPLATE } from './protocol-template';
+import {
+  createRuntimeLockMetadata,
+  defaultInvalidLockStaleAfterMs,
+  getRuntimeLocalityToken,
+  isRuntimeLockOwnedByProcess,
+  isRuntimeLockStale,
+  parseRuntimeLock,
+  serializeRuntimeLock,
+} from './runtime-state';
 
 const PERSISTENT_DIR = '.flowpilot';
 const LEGACY_RUNTIME_DIR = '.workflow';
@@ -107,33 +117,112 @@ export class FsWorkflowRepository implements WorkflowRepository {
     await mkdir(dir, { recursive: true });
   }
 
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error: any) {
+      if (error?.code === 'ESRCH') return false;
+      return true;
+    }
+  }
+
+  private async reclaimStaleLock(lockPath: string): Promise<boolean> {
+    try {
+      const [raw, fileStat] = await Promise.all([
+        readFile(lockPath, 'utf-8'),
+        stat(lockPath),
+      ]);
+      const parsed = parseRuntimeLock(raw);
+      const decision = isRuntimeLockStale({
+        parsed,
+        fileAgeMs: Date.now() - fileStat.mtimeMs,
+        staleAfterMs: defaultInvalidLockStaleAfterMs(),
+        isProcessAlive: pid => this.isProcessAlive(pid),
+        currentHostname: hostname(),
+        currentLocalityToken: getRuntimeLocalityToken(),
+      });
+      if (!decision.stale) return false;
+      await unlink(lockPath);
+      return true;
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') return true;
+      return false;
+    }
+  }
+
+  private async describeLockFailure(lockPath: string): Promise<string> {
+    try {
+      const raw = await readFile(lockPath, 'utf-8');
+      const parsed = parseRuntimeLock(raw);
+      if (!parsed.valid) return '无法获取文件锁：现有锁元数据无效且未达到安全回收条件';
+      const ageMs = Math.max(0, Date.now() - Date.parse(parsed.metadata.createdAt));
+      if (parsed.metadata.hostname === hostname() && parsed.metadata.localityToken === undefined) {
+        return '无法获取文件锁：同主机锁缺少可证明本地性的元数据，拒绝盲目回收';
+      }
+      return `无法获取文件锁：当前由 pid ${parsed.metadata.pid} 在 ${parsed.metadata.hostname} 上持有，已存在 ${ageMs}ms`;
+    } catch {
+      return '无法获取文件锁';
+    }
+  }
+
   /** 文件锁：用 O_EXCL 创建 lockfile，防止并发读写 */
   async lock(maxWait = 5000): Promise<void> {
     await this.ensure(this.root);
     const lockPath = join(this.root, '.lock');
     const start = Date.now();
-    while (Date.now() - start < maxWait) {
+    const tryAcquire = async (): Promise<boolean> => {
+      let fd: number;
       try {
-        const fd = openSync(lockPath, 'wx');
-        closeSync(fd);
-        return;
-      } catch {
-        await new Promise(r => setTimeout(r, 50));
+        fd = openSync(lockPath, 'wx');
+      } catch (error: any) {
+        if (error?.code === 'EEXIST') return false;
+        throw error;
       }
+
+      try {
+        const payload = serializeRuntimeLock(createRuntimeLockMetadata());
+        writeFileSync(fd, payload, 'utf-8');
+      } catch (error) {
+        try {
+          closeSync(fd);
+        } catch {}
+        try {
+          await unlink(lockPath);
+        } catch {}
+        throw error;
+      }
+
+      try {
+        closeSync(fd);
+        return true;
+      } catch (error) {
+        try {
+          await unlink(lockPath);
+        } catch {}
+        throw error;
+      }
+    };
+
+    while (Date.now() - start < maxWait) {
+      if (await tryAcquire()) return;
+      await new Promise(r => setTimeout(r, 50));
     }
-    // 超时强制清除死锁，再尝试一次
-    try { await unlink(lockPath); } catch {}
-    try {
-      const fd = openSync(lockPath, 'wx');
-      closeSync(fd);
-      return;
-    } catch {
-      throw new Error('无法获取文件锁');
-    }
+
+    const reclaimed = await this.reclaimStaleLock(lockPath);
+    if (reclaimed && await tryAcquire()) return;
+
+    throw new Error(await this.describeLockFailure(lockPath));
   }
 
   async unlock(): Promise<void> {
-    try { await unlink(join(this.root, '.lock')); } catch {}
+    const lockPath = join(this.root, '.lock');
+    try {
+      const raw = await readFile(lockPath, 'utf-8');
+      const parsed = parseRuntimeLock(raw);
+      if (!isRuntimeLockOwnedByProcess(parsed)) return;
+      await unlink(lockPath);
+    } catch {}
   }
 
   // --- progress.md 读写 ---

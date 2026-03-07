@@ -4,7 +4,7 @@
 // src/infrastructure/fs-repository.ts
 var import_promises = require("fs/promises");
 var import_path = require("path");
-var import_fs = require("fs");
+var import_fs2 = require("fs");
 var import_os2 = require("os");
 
 // src/infrastructure/git.ts
@@ -420,19 +420,31 @@ echo '\u6458\u8981 [REMEMBER] \u5173\u952E\u53D1\u73B0 [DECISION] \u6280\u672F\u
 <!-- flowpilot:end -->`;
 
 // src/infrastructure/runtime-state.ts
+var import_fs = require("fs");
 var import_os = require("os");
 var DEFAULT_INVALID_LOCK_STALE_AFTER_MS = 3e4;
+var LINUX_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isValidCreatedAt(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
+function getRuntimeLocalityToken() {
+  try {
+    const token = (0, import_fs.readFileSync)(LINUX_BOOT_ID_PATH, "utf-8").trim();
+    return token.length > 0 ? token : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function createRuntimeLockMetadata() {
+  const localityToken = getRuntimeLocalityToken();
   return {
     pid: process.pid,
     hostname: (0, import_os.hostname)(),
-    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    ...localityToken ? { localityToken } : {}
   };
 }
 function serializeRuntimeLock(metadata) {
@@ -445,12 +457,18 @@ function parseRuntimeLock(raw) {
     const pid = parsed.pid;
     const hostname2 = parsed.hostname;
     const createdAt = parsed.createdAt;
-    if (!Number.isInteger(pid) || pid <= 0 || typeof hostname2 !== "string" || hostname2.length === 0 || !isValidCreatedAt(createdAt)) {
+    const localityToken = parsed.localityToken;
+    if (!Number.isInteger(pid) || pid <= 0 || typeof hostname2 !== "string" || hostname2.length === 0 || !isValidCreatedAt(createdAt) || localityToken !== void 0 && (typeof localityToken !== "string" || localityToken.length === 0)) {
       return { valid: false, reason: "invalid-shape" };
     }
     return {
       valid: true,
-      metadata: { pid, hostname: hostname2, createdAt }
+      metadata: {
+        pid,
+        hostname: hostname2,
+        createdAt,
+        ...typeof localityToken === "string" ? { localityToken } : {}
+      }
     };
   } catch {
     return { valid: false, reason: "invalid-json" };
@@ -459,8 +477,14 @@ function parseRuntimeLock(raw) {
 function getRuntimeLockAgeMs(metadata, nowMs = Date.now()) {
   return Math.max(0, nowMs - Date.parse(metadata.createdAt));
 }
-function isRuntimeLockOwnedByProcess(parsed, pid = process.pid, currentHostname = (0, import_os.hostname)()) {
-  return parsed.valid && parsed.metadata.pid === pid && parsed.metadata.hostname === currentHostname;
+function isRuntimeLockOwnedByProcess(parsed, pid = process.pid, currentHostname = (0, import_os.hostname)(), currentLocalityToken = getRuntimeLocalityToken()) {
+  if (!parsed.valid || parsed.metadata.pid !== pid || parsed.metadata.hostname !== currentHostname) {
+    return false;
+  }
+  if (parsed.metadata.localityToken === void 0) {
+    return true;
+  }
+  return currentLocalityToken !== void 0 && parsed.metadata.localityToken === currentLocalityToken;
 }
 function isRuntimeLockStale(input) {
   if (!input.parsed.valid) {
@@ -475,6 +499,23 @@ function isRuntimeLockStale(input) {
     return {
       stale: false,
       reason: "foreign-host-lock",
+      owner: input.parsed.metadata,
+      ageMs
+    };
+  }
+  if (input.parsed.metadata.localityToken !== void 0 && input.currentLocalityToken !== void 0) {
+    if (input.parsed.metadata.localityToken !== input.currentLocalityToken) {
+      return {
+        stale: false,
+        reason: "foreign-host-lock",
+        owner: input.parsed.metadata,
+        ageMs
+      };
+    }
+  } else {
+    return {
+      stale: false,
+      reason: "unverified-locality",
       owner: input.parsed.metadata,
       ageMs
     };
@@ -603,7 +644,8 @@ var FsWorkflowRepository = class {
         fileAgeMs: Date.now() - fileStat.mtimeMs,
         staleAfterMs: defaultInvalidLockStaleAfterMs(),
         isProcessAlive: (pid) => this.isProcessAlive(pid),
-        currentHostname: (0, import_os2.hostname)()
+        currentHostname: (0, import_os2.hostname)(),
+        currentLocalityToken: getRuntimeLocalityToken()
       });
       if (!decision.stale) return false;
       await (0, import_promises.unlink)(lockPath);
@@ -619,6 +661,9 @@ var FsWorkflowRepository = class {
       const parsed = parseRuntimeLock(raw);
       if (!parsed.valid) return "\u65E0\u6CD5\u83B7\u53D6\u6587\u4EF6\u9501\uFF1A\u73B0\u6709\u9501\u5143\u6570\u636E\u65E0\u6548\u4E14\u672A\u8FBE\u5230\u5B89\u5168\u56DE\u6536\u6761\u4EF6";
       const ageMs = Math.max(0, Date.now() - Date.parse(parsed.metadata.createdAt));
+      if (parsed.metadata.hostname === (0, import_os2.hostname)() && parsed.metadata.localityToken === void 0) {
+        return "\u65E0\u6CD5\u83B7\u53D6\u6587\u4EF6\u9501\uFF1A\u540C\u4E3B\u673A\u9501\u7F3A\u5C11\u53EF\u8BC1\u660E\u672C\u5730\u6027\u7684\u5143\u6570\u636E\uFF0C\u62D2\u7EDD\u76F2\u76EE\u56DE\u6536";
+      }
       return `\u65E0\u6CD5\u83B7\u53D6\u6587\u4EF6\u9501\uFF1A\u5F53\u524D\u7531 pid ${parsed.metadata.pid} \u5728 ${parsed.metadata.hostname} \u4E0A\u6301\u6709\uFF0C\u5DF2\u5B58\u5728 ${ageMs}ms`;
     } catch {
       return "\u65E0\u6CD5\u83B7\u53D6\u6587\u4EF6\u9501";
@@ -630,14 +675,36 @@ var FsWorkflowRepository = class {
     const lockPath = (0, import_path.join)(this.root, ".lock");
     const start = Date.now();
     const tryAcquire = async () => {
+      let fd;
       try {
-        const fd = (0, import_fs.openSync)(lockPath, "wx");
+        fd = (0, import_fs2.openSync)(lockPath, "wx");
+      } catch (error) {
+        if (error?.code === "EEXIST") return false;
+        throw error;
+      }
+      try {
         const payload = serializeRuntimeLock(createRuntimeLockMetadata());
-        await (0, import_promises.writeFile)(lockPath, payload, "utf-8");
-        (0, import_fs.closeSync)(fd);
+        (0, import_fs2.writeFileSync)(fd, payload, "utf-8");
+      } catch (error) {
+        try {
+          (0, import_fs2.closeSync)(fd);
+        } catch {
+        }
+        try {
+          await (0, import_promises.unlink)(lockPath);
+        } catch {
+        }
+        throw error;
+      }
+      try {
+        (0, import_fs2.closeSync)(fd);
         return true;
-      } catch {
-        return false;
+      } catch (error) {
+        try {
+          await (0, import_promises.unlink)(lockPath);
+        } catch {
+        }
+        throw error;
       }
     };
     while (Date.now() - start < maxWait) {
@@ -1046,9 +1113,6 @@ function reopenRollbackBranch(tasks, targetId) {
   }
   return tasks.map((task) => {
     if (!affected.has(task.id)) return { ...task };
-    if (task.status !== "done" && task.status !== "skipped" && task.status !== "failed") {
-      return { ...task };
-    }
     return { ...task, status: "pending", summary: "", retries: 0 };
   });
 }
@@ -1151,7 +1215,7 @@ var import_child_process = require("child_process");
 var import_path3 = require("path");
 
 // src/infrastructure/logger.ts
-var import_fs2 = require("fs");
+var import_fs3 = require("fs");
 var import_path2 = require("path");
 var verbose = process.env.FLOWPILOT_VERBOSE === "1";
 var basePath = null;
@@ -1174,8 +1238,8 @@ function persist(entry) {
   const p = logFilePath();
   if (!p) return;
   try {
-    (0, import_fs2.mkdirSync)((0, import_path2.dirname)(p), { recursive: true });
-    (0, import_fs2.appendFileSync)(p, JSON.stringify(entry) + "\n", "utf-8");
+    (0, import_fs3.mkdirSync)((0, import_path2.dirname)(p), { recursive: true });
+    (0, import_fs3.appendFileSync)(p, JSON.stringify(entry) + "\n", "utf-8");
   } catch {
   }
 }
@@ -3511,7 +3575,9 @@ ${evolutionSummary}${this.formatCommitMessage(commitResult, "finish")}
       const err = this.repo.rollback(id);
       if (err) return `\u56DE\u6EDA\u5931\u8D25: ${err}`;
       const newTasks = reopenRollbackBranch(data.tasks, id);
-      await this.repo.saveProgress({ ...data, current: null, tasks: newTasks });
+      const newData = { ...data, status: "running", current: null, tasks: newTasks };
+      await this.repo.saveProgress(newData);
+      await this.updateSummary(newData);
       const resetCount = newTasks.filter(
         (taskEntry, index) => taskEntry.status === "pending" && data.tasks[index].status !== "pending"
       ).length;
@@ -3738,7 +3804,7 @@ ${entry}`;
 };
 
 // src/interfaces/cli.ts
-var import_fs3 = require("fs");
+var import_fs4 = require("fs");
 var import_path11 = require("path");
 
 // src/interfaces/formatter.ts
@@ -3874,7 +3940,7 @@ var CLI = class {
         if (fileIdx >= 0 && rest[fileIdx + 1]) {
           const filePath = (0, import_path11.resolve)(rest[fileIdx + 1]);
           if ((0, import_path11.relative)(process.cwd(), filePath).startsWith("..")) throw new Error("--file \u8DEF\u5F84\u4E0D\u80FD\u8D85\u51FA\u9879\u76EE\u76EE\u5F55");
-          detail = (0, import_fs3.readFileSync)(filePath, "utf-8");
+          detail = (0, import_fs4.readFileSync)(filePath, "utf-8");
         } else if (rest.length > 1 && fileIdx < 0 && filesIdx < 0) {
           detail = rest.slice(1).join(" ");
         } else {
