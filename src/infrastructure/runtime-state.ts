@@ -13,6 +13,7 @@ const LINUX_BOOT_ID_PATH = '/proc/sys/kernel/random/boot_id';
 const RUNTIME_DIR = '.workflow';
 const ACTIVATED_FILE = 'activated.json';
 const DIRTY_BASELINE_FILE = 'dirty-baseline.json';
+const OWNED_FILES_FILE = 'owned-files.json';
 const RUNTIME_PATH_PREFIXES = ['.flowpilot/', '.workflow/'];
 const RUNTIME_FILES = new Set(['.claude/settings.json']);
 
@@ -34,6 +35,11 @@ export interface TaskActivationMetadata {
 export interface DirtyBaseline {
   capturedAt: string;
   files: string[];
+}
+
+/** checkpoint 持久化的 workflow-owned 文件 */
+export interface OwnedFilesState {
+  byTask: Record<string, string[]>;
 }
 
 /** 当前 dirty 文件相对 baseline 的对比结果 */
@@ -112,6 +118,20 @@ function normalizeDirtyFiles(files: string[]): string[] {
   }
 
   return [...seen].sort();
+}
+
+function isOwnedFilesState(value: unknown): value is OwnedFilesState {
+  return isRecord(value) && isRecord(value.byTask);
+}
+
+function normalizeOwnedFilesState(state: OwnedFilesState): OwnedFilesState {
+  return {
+    byTask: Object.fromEntries(
+      Object.entries(state.byTask)
+        .filter(([taskId]) => taskId.trim().length > 0)
+        .map(([taskId, files]) => [taskId, normalizeDirtyFiles(Array.isArray(files) ? files.filter((file): file is string => typeof file === 'string') : [])]),
+    ),
+  };
 }
 
 /** 对比当前 dirty 文件与 workflow 启动 baseline，区分历史脏文件与中断残留 */
@@ -348,6 +368,45 @@ export async function saveDirtyBaseline(
   await writeFile(path + '.tmp', JSON.stringify(baseline), 'utf-8');
   await rename(path + '.tmp', path);
   return baseline;
+}
+
+/** 读取 checkpoint-owned 文件状态，旧工作流缺失时返回空映射 */
+export async function loadOwnedFiles(basePath: string): Promise<OwnedFilesState> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(runtimePath(basePath, OWNED_FILES_FILE), 'utf-8'));
+    if (!isOwnedFilesState(parsed)) {
+      return { byTask: {} };
+    }
+    return normalizeOwnedFilesState(parsed);
+  } catch {
+    return { byTask: {} };
+  }
+}
+
+/** 持久化单个 checkpoint 的 owned-file intent */
+export async function recordOwnedFiles(
+  basePath: string,
+  taskId: string,
+  files: string[],
+): Promise<OwnedFilesState> {
+  const current = await loadOwnedFiles(basePath);
+  const next = normalizeOwnedFilesState({
+    byTask: {
+      ...current.byTask,
+      [taskId]: normalizeDirtyFiles(files),
+    },
+  });
+  await mkdir(runtimeDir(basePath), { recursive: true });
+  const path = runtimePath(basePath, OWNED_FILES_FILE);
+  await writeFile(path + '.tmp', JSON.stringify(next), 'utf-8');
+  await rename(path + '.tmp', path);
+  return next;
+}
+
+/** 汇总所有 checkpoint 持久化的 workflow-owned 文件 */
+export function collectOwnedFiles(state: OwnedFilesState): string[] {
+  const allFiles = Object.values(state.byTask).flatMap(files => files);
+  return normalizeDirtyFiles(allFiles);
 }
 
 /** 无效锁文件的默认陈旧回收阈值 */

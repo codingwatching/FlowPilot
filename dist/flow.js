@@ -429,6 +429,7 @@ var LINUX_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 var RUNTIME_DIR = ".workflow";
 var ACTIVATED_FILE = "activated.json";
 var DIRTY_BASELINE_FILE = "dirty-baseline.json";
+var OWNED_FILES_FILE = "owned-files.json";
 var RUNTIME_PATH_PREFIXES = [".flowpilot/", ".workflow/"];
 var RUNTIME_FILES = /* @__PURE__ */ new Set([".claude/settings.json"]);
 function isRecord(value) {
@@ -459,6 +460,16 @@ function normalizeDirtyFiles(files) {
     seen.add(file);
   }
   return [...seen].sort();
+}
+function isOwnedFilesState(value) {
+  return isRecord(value) && isRecord(value.byTask);
+}
+function normalizeOwnedFilesState(state) {
+  return {
+    byTask: Object.fromEntries(
+      Object.entries(state.byTask).filter(([taskId]) => taskId.trim().length > 0).map(([taskId, files]) => [taskId, normalizeDirtyFiles(Array.isArray(files) ? files.filter((file) => typeof file === "string") : [])])
+    )
+  };
 }
 function compareDirtyFilesAgainstBaseline(currentFiles, baselineFiles) {
   const normalizedCurrentFiles = normalizeDirtyFiles(currentFiles);
@@ -628,6 +639,35 @@ async function saveDirtyBaseline(basePath2, files, capturedAt = (/* @__PURE__ */
   await (0, import_promises.writeFile)(path + ".tmp", JSON.stringify(baseline), "utf-8");
   await (0, import_promises.rename)(path + ".tmp", path);
   return baseline;
+}
+async function loadOwnedFiles(basePath2) {
+  try {
+    const parsed = JSON.parse(await (0, import_promises.readFile)(runtimePath(basePath2, OWNED_FILES_FILE), "utf-8"));
+    if (!isOwnedFilesState(parsed)) {
+      return { byTask: {} };
+    }
+    return normalizeOwnedFilesState(parsed);
+  } catch {
+    return { byTask: {} };
+  }
+}
+async function recordOwnedFiles(basePath2, taskId, files) {
+  const current = await loadOwnedFiles(basePath2);
+  const next = normalizeOwnedFilesState({
+    byTask: {
+      ...current.byTask,
+      [taskId]: normalizeDirtyFiles(files)
+    }
+  });
+  await (0, import_promises.mkdir)(runtimeDir(basePath2), { recursive: true });
+  const path = runtimePath(basePath2, OWNED_FILES_FILE);
+  await (0, import_promises.writeFile)(path + ".tmp", JSON.stringify(next), "utf-8");
+  await (0, import_promises.rename)(path + ".tmp", path);
+  return next;
+}
+function collectOwnedFiles(state) {
+  const allFiles = Object.values(state.byTask).flatMap((files) => files);
+  return normalizeDirtyFiles(allFiles);
 }
 function defaultInvalidLockStaleAfterMs() {
   return DEFAULT_INVALID_LOCK_STALE_AFTER_MS;
@@ -3426,6 +3466,7 @@ ${warns.join("\n")}` : msg2;
 
 ${detail}
 `);
+      await recordOwnedFiles(this.repo.projectRoot(), id, files ?? []);
       for (const entry of await extractAll(detail, `task-${id}`, existingMems)) {
         await appendMemory(this.repo.projectRoot(), {
           content: entry.content,
@@ -3506,6 +3547,44 @@ ${detail}
       lines.push(...comparison.newDirtyFiles.map((file) => `- ${file}`));
     }
     return lines;
+  }
+  /** 计算 finish 的 workflow-owned 提交边界，必要时拒绝最终提交 */
+  async resolveFinishCommitFiles() {
+    const currentDirtyFiles = this.repo.listChangedFiles();
+    const baseline = await loadDirtyBaseline(this.repo.projectRoot());
+    const comparison = compareDirtyFilesAgainstBaseline(currentDirtyFiles, baseline?.files ?? []);
+    const ownedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
+    const ownedSet = new Set(ownedFiles);
+    if (!baseline) {
+      return {
+        ok: false,
+        message: [
+          "\u62D2\u7EDD\u6700\u7EC8\u63D0\u4EA4\uFF1A\u672A\u627E\u5230 dirty baseline\uFF0C\u65E0\u6CD5\u8BC1\u660E\u5DE5\u4F5C\u6D41\u8FB9\u754C\u5B89\u5168\u3002",
+          ...comparison.currentFiles.map((file) => `- ${file}`)
+        ].join("\n")
+      };
+    }
+    if (comparison.preservedBaselineFiles.length > 0) {
+      return {
+        ok: false,
+        message: [
+          "\u62D2\u7EDD\u6700\u7EC8\u63D0\u4EA4\uFF1A\u5DE5\u4F5C\u6D41\u542F\u52A8\u524D\u5DF2\u6709\u810F\u6587\u4EF6\uFF0Cfinish \u4E0D\u80FD\u8D8A\u6743\u5C06\u5176\u7EB3\u5165\u6700\u7EC8\u63D0\u4EA4\u3002",
+          ...comparison.preservedBaselineFiles.map((file) => `- ${file}`)
+        ].join("\n")
+      };
+    }
+    const unownedDirtyFiles = comparison.newDirtyFiles.filter((file) => !ownedSet.has(file));
+    if (unownedDirtyFiles.length > 0) {
+      return {
+        ok: false,
+        message: [
+          "\u62D2\u7EDD\u6700\u7EC8\u63D0\u4EA4\uFF1A\u68C0\u6D4B\u5230\u672A\u5F52\u5C5E\u7ED9 workflow checkpoint \u7684\u810F\u6587\u4EF6\u3002",
+          ...unownedDirtyFiles.map((file) => `- ${file}`)
+        ].join("\n")
+      };
+    }
+    const finishFiles = comparison.newDirtyFiles.filter((file) => ownedSet.has(file));
+    return { ok: true, files: finishFiles };
   }
   /** add: 追加任务 */
   async add(title, type) {
@@ -3632,12 +3711,18 @@ ${verifySummary}
       experimentRan,
       changedConfigKeys
     });
+    const finishBoundary = await this.resolveFinishCommitFiles();
+    if (!finishBoundary.ok) {
+      return `${verifySummary}
+${stats}
+${evolutionSummary}
+${finishBoundary.message}`;
+    }
     await this.repo.cleanupInjections();
     this.repo.cleanTags();
-    const changedFiles = this.repo.listChangedFiles();
     const commitResult = this.repo.commit("finish", data.name || "\u5DE5\u4F5C\u6D41\u5B8C\u6210", `${stats}
 
-${titles}`, changedFiles);
+${titles}`, finishBoundary.files);
     if (commitResult.status !== "failed") {
       await this.repo.clearAll();
     }

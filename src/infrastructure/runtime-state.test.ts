@@ -11,6 +11,9 @@ import {
   parseRuntimeLock,
   recordTaskActivations,
   saveDirtyBaseline,
+  loadOwnedFiles,
+  recordOwnedFiles,
+  collectOwnedFiles,
 } from './runtime-state';
 
 let dir: string;
@@ -70,6 +73,38 @@ describe('runtime-state lock metadata', () => {
 });
 
 describe('runtime-state shared metadata', () => {
+  it('recordOwnedFiles persists normalized checkpoint-owned files by task', async () => {
+    const first = await recordOwnedFiles(dir, '001', [
+      './src/app.ts',
+      'src\\app.ts',
+      '/README.md',
+      '.workflow/progress.md',
+      '.flowpilot/history/latest.json',
+      '.claude/settings.json',
+    ]);
+    await recordOwnedFiles(dir, '002', [
+      './docs/guide.md',
+      'README.md',
+    ]);
+
+    expect(first).toEqual({
+      byTask: {
+        '001': ['README.md', 'src/app.ts'],
+      },
+    });
+    await expect(loadOwnedFiles(dir)).resolves.toEqual({
+      byTask: {
+        '001': ['README.md', 'src/app.ts'],
+        '002': ['README.md', 'docs/guide.md'],
+      },
+    });
+    expect(collectOwnedFiles(await loadOwnedFiles(dir))).toEqual([
+      'README.md',
+      'docs/guide.md',
+      'src/app.ts',
+    ]);
+  });
+
   it('recordTaskActivations persists activation metadata for later readers', async () => {
     await recordTaskActivations(dir, ['001'], 1_000, 111);
     await recordTaskActivations(dir, ['002'], 4_000, 222);

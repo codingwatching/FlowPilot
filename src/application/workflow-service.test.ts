@@ -497,6 +497,29 @@ describe('WorkflowService 集成测试', () => {
     expect(msg).not.toContain('[已自动提交]');
   });
 
+  it('checkpoint会持久化 --files 的 owned-file intent，即使任务提交是 no-op', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    mockCommitResult(repo, { status: 'skipped', reason: 'no-staged-changes' });
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await svc.init(TASKS_MD);
+    await svc.next();
+
+    await svc.checkpoint('001', '表结构设计完成', [
+      './src/main.ts',
+      'src\\main.ts',
+      '.workflow/progress.md',
+      '.claude/settings.json',
+      '/README.md',
+    ]);
+
+    const owned = JSON.parse(await readFile(join(dir, '.workflow', 'owned-files.json'), 'utf-8'));
+    expect(owned).toEqual({
+      byTask: {
+        '001': ['README.md', 'src/main.ts'],
+      },
+    });
+  });
+
   it('checkpoint在未提供文件时明确提示未自动提交原因', async () => {
     const repo = new FsWorkflowRepository(dir);
     mockCommitResult(repo, { status: 'skipped', reason: 'no-files' });
@@ -510,19 +533,27 @@ describe('WorkflowService 集成测试', () => {
     expect(msg).not.toContain('[已自动提交]');
   });
 
-  it('finish在存在业务改动时会提交最终commit', async () => {
+  it('finish在干净启动时只提交 workflow-owned 文件', async () => {
     const repo = new FsWorkflowRepository(dir);
-    mockChangedFiles(repo, ['src/main.ts']);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce([]);
+    changedFilesSpy.mockReturnValue(['src/main.ts']);
     const commitSpy = vi.spyOn(repo, 'commit').mockImplementation((taskId, title, summary, files) => {
       if (taskId !== 'finish') {
-        return { status: 'skipped', reason: 'no-files' };
+        return { status: 'skipped', reason: 'no-staged-changes' };
       }
       expect(files).toEqual(['src/main.ts']);
       return { status: 'committed' };
     });
     vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test -- --run'] });
     svc = new WorkflowService(repo, parseTasksMarkdown);
-    await completeWorkflow(svc);
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.checkpoint('001', '表结构设计完成', ['src/main.ts']);
+    await svc.next();
+    await svc.checkpoint('002', '页面完成');
+    await svc.next();
+    await svc.checkpoint('003', '文档完成');
     await svc.review();
 
     const msg = await svc.finish();
@@ -533,6 +564,58 @@ describe('WorkflowService 集成测试', () => {
     expect(commitSpy).toHaveBeenCalledTimes(4);
     expect(commitSpy.mock.calls.at(-1)?.[0]).toBe('finish');
     expect(await svc.status()).toBeNull();
+  });
+
+  it('finish在脏启动且边界外文件仍脏时拒绝最终提交', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce(['README.md']);
+    changedFilesSpy.mockReturnValue(['README.md', 'src/main.ts']);
+    const commitSpy = vi.spyOn(repo, 'commit');
+    vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
+    const clearAllSpy = vi.spyOn(repo, 'clearAll');
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.checkpoint('001', '表结构设计完成', ['src/main.ts']);
+    await svc.next();
+    await svc.checkpoint('002', '页面完成');
+    await svc.next();
+    await svc.checkpoint('003', '文档完成');
+    await svc.review();
+
+    const msg = await svc.finish();
+    expect(msg).toContain('拒绝最终提交');
+    expect(msg).toContain('README.md');
+    expect(msg).toContain('工作流启动前已有脏文件');
+    expect(commitSpy).not.toHaveBeenCalledWith('finish', expect.any(String), expect.any(String), expect.anything());
+    expect(clearAllSpy).not.toHaveBeenCalled();
+    expect((await svc.status())?.status).toBe('finishing');
+  });
+
+  it('finish在存在未归属脏文件时拒绝而不是误提交', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    mockChangedFiles(repo, ['src/main.ts', 'src/unowned.ts']);
+    const commitSpy = vi.spyOn(repo, 'commit');
+    vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
+    const clearAllSpy = vi.spyOn(repo, 'clearAll');
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.checkpoint('001', '表结构设计完成', ['src/main.ts']);
+    await svc.next();
+    await svc.checkpoint('002', '页面完成');
+    await svc.next();
+    await svc.checkpoint('003', '文档完成');
+    await svc.review();
+
+    const msg = await svc.finish();
+    expect(msg).toContain('拒绝最终提交');
+    expect(msg).toContain('src/unowned.ts');
+    expect(msg).not.toContain('已提交最终commit');
+    expect(commitSpy).not.toHaveBeenCalledWith('finish', expect.any(String), expect.any(String), expect.anything());
+    expect(clearAllSpy).not.toHaveBeenCalled();
+    expect((await svc.status())?.status).toBe('finishing');
   });
 
   it('finish在未提供文件时说明未提交最终commit但仍正常收尾', async () => {

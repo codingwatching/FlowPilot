@@ -15,7 +15,7 @@ import { extractAll } from '../infrastructure/extractor';
 import { truncateHeadTail, computeMaxChars } from '../infrastructure/truncation';
 import { detect as detectLoop, type LoopDetection } from '../infrastructure/loop-detector';
 import { startHeartbeat, runHeartbeat } from '../infrastructure/heartbeat';
-import { compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, recordTaskActivations, saveDirtyBaseline } from '../infrastructure/runtime-state';
+import { collectOwnedFiles, compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, loadOwnedFiles, recordOwnedFiles, recordTaskActivations, saveDirtyBaseline } from '../infrastructure/runtime-state';
 import { writeFile, readFile, unlink, mkdir } from 'fs/promises';
 import { join } from 'path';
 
@@ -335,6 +335,7 @@ export class WorkflowService {
 
       await this.repo.saveProgress(newData);
       await this.repo.saveTaskContext(id, `# task-${id}: ${task.title}\n\n${detail}\n`);
+      await recordOwnedFiles(this.repo.projectRoot(), id, files ?? []);
 
       // 智能提取知识写入永久记忆
       for (const entry of await extractAll(detail, `task-${id}`, existingMems)) {
@@ -430,6 +431,49 @@ export class WorkflowService {
       lines.push(...comparison.newDirtyFiles.map(file => `- ${file}`));
     }
     return lines;
+  }
+
+  /** 计算 finish 的 workflow-owned 提交边界，必要时拒绝最终提交 */
+  private async resolveFinishCommitFiles(): Promise<{ ok: true; files: string[] } | { ok: false; message: string }> {
+    const currentDirtyFiles = this.repo.listChangedFiles();
+    const baseline = await loadDirtyBaseline(this.repo.projectRoot());
+    const comparison = compareDirtyFilesAgainstBaseline(currentDirtyFiles, baseline?.files ?? []);
+    const ownedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
+    const ownedSet = new Set(ownedFiles);
+
+    if (!baseline) {
+      return {
+        ok: false,
+        message: [
+          '拒绝最终提交：未找到 dirty baseline，无法证明工作流边界安全。',
+          ...comparison.currentFiles.map(file => `- ${file}`),
+        ].join('\n'),
+      };
+    }
+
+    if (comparison.preservedBaselineFiles.length > 0) {
+      return {
+        ok: false,
+        message: [
+          '拒绝最终提交：工作流启动前已有脏文件，finish 不能越权将其纳入最终提交。',
+          ...comparison.preservedBaselineFiles.map(file => `- ${file}`),
+        ].join('\n'),
+      };
+    }
+
+    const unownedDirtyFiles = comparison.newDirtyFiles.filter(file => !ownedSet.has(file));
+    if (unownedDirtyFiles.length > 0) {
+      return {
+        ok: false,
+        message: [
+          '拒绝最终提交：检测到未归属给 workflow checkpoint 的脏文件。',
+          ...unownedDirtyFiles.map(file => `- ${file}`),
+        ].join('\n'),
+      };
+    }
+
+    const finishFiles = comparison.newDirtyFiles.filter(file => ownedSet.has(file));
+    return { ok: true, files: finishFiles };
   }
 
   /** add: 追加任务 */
@@ -570,10 +614,14 @@ export class WorkflowService {
       changedConfigKeys,
     });
 
+    const finishBoundary = await this.resolveFinishCommitFiles();
+    if (!finishBoundary.ok) {
+      return `${verifySummary}\n${stats}\n${evolutionSummary}\n${finishBoundary.message}`;
+    }
+
     await this.repo.cleanupInjections();
     this.repo.cleanTags();
-    const changedFiles = this.repo.listChangedFiles();
-    const commitResult = this.repo.commit('finish', data.name || '工作流完成', `${stats}\n\n${titles}`, changedFiles);
+    const commitResult = this.repo.commit('finish', data.name || '工作流完成', `${stats}\n\n${titles}`, finishBoundary.files);
     if (commitResult.status !== 'failed') {
       await this.repo.clearAll();
     }
