@@ -146,7 +146,7 @@ Round 3: Polish → Code quality improvement → Final verification
 
 ### Self-Evolution — Each Round Makes the Next Smarter
 
-FlowPilot has a built-in three-phase organic evolution cycle. Both success and failure trigger evolution, with results written to `.workflow/config.json` and consumed by the workflow:
+FlowPilot has a built-in three-phase organic evolution cycle. Both success and failure trigger evolution, with results written to `.flowpilot/config.json` and consumed by maxRetries / parallelLimit / hints / verify / hooks:
 
 ```
 finish() triggers:
@@ -251,12 +251,13 @@ Main Agent (dispatcher, < 100 lines context)
   ├─ .workflow/ (workflow persistence layer)
   │   ├─ progress.md        # Task status table (main agent reads)
   │   ├─ tasks.md           # Complete task definitions
-  │   ├─ config.json        # Evolution parameters (maxRetries/parallelLimit/hints)
+  │   ├─ config.json        # Runtime file (legacy-compatible, migration recommended)
   │   └─ context/
   │       ├─ summary.md     # Rolling summary
   │       └─ task-xxx.md    # Detailed output per task
   │
   └─ .flowpilot/ (cross-workflow persistence layer)
+      ├─ config.json        # Persistent config (maxRetries/parallelLimit/hints/verify/hooks)
       ├─ memory.json        # Long-term memory store (knowledge entries + tags + timestamps)
       └─ evolution/         # Evolution history (reflect/experiment/review records)
 ```

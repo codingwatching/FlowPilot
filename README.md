@@ -146,7 +146,7 @@ CC 会自动：拆解任务 → 识别依赖 → 并行派发子Agent → 写代
 
 ### 自我进化 — 每跑一轮，下一轮更聪明
 
-FlowPilot 内置三阶段有机进化循环，成功和失败均触发进化，结果写入 `.workflow/config.json` 被工作流真正消费：
+FlowPilot 内置三阶段有机进化循环，成功和失败均触发进化，结果写入 `.flowpilot/config.json`，被 maxRetries / parallelLimit / hints / verify / hooks 真正消费：
 
 ```
 finish() 触发：
@@ -251,12 +251,13 @@ claude --dangerously-skip-permissions --resume     # 从历史对话列表选择
   ├─ .workflow/（工作流持久化层）
   │   ├─ progress.md        # 任务状态表（主Agent读）
   │   ├─ tasks.md           # 完整任务定义
-  │   ├─ config.json        # 进化参数（maxRetries/parallelLimit/hints）
+  │   ├─ config.json        # 运行态文件（兼容旧路径，推荐迁移）
   │   └─ context/
   │       ├─ summary.md     # 滚动摘要
   │       └─ task-xxx.md    # 各任务详细产出
   │
   └─ .flowpilot/（跨工作流持久化层）
+      ├─ config.json        # 持久配置（maxRetries/parallelLimit/hints/verify/hooks）
       ├─ memory.json        # 长期记忆库（知识条目 + 标签 + 时间戳）
       └─ evolution/         # 进化历史（reflect/experiment/review 记录）
 ```

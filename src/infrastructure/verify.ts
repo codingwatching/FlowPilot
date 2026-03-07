@@ -13,13 +13,21 @@ export interface VerifyResult {
   error?: string;
 }
 
-/** 从 .workflow/config.json 加载验证配置 */
+/** 优先从 .flowpilot/config.json 加载验证配置，兼容旧的 .workflow/config.json */
 function loadConfig(cwd: string): { commands?: string[]; timeout?: number } {
-  try {
-    const raw = readFileSync(join(cwd, '.workflow', 'config.json'), 'utf-8');
-    const cfg = JSON.parse(raw);
-    return cfg?.verify ?? {};
-  } catch { return {}; }
+  for (const configPath of [
+    join(cwd, '.flowpilot', 'config.json'),
+    join(cwd, '.workflow', 'config.json'),
+  ]) {
+    try {
+      const raw = readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+      return cfg?.verify ?? {};
+    } catch {
+      // 尝试下一个兼容路径
+    }
+  }
+  return {};
 }
 
 /** 自动检测并执行项目验证脚本 */
