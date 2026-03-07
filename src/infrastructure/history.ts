@@ -9,6 +9,10 @@ import { log } from './logger';
 import { readFile, writeFile, mkdir, readdir } from 'fs/promises';
 import { join, dirname } from 'path';
 
+const PERSISTENT_CONFIG_PATH = ['.flowpilot', 'config.json'] as const;
+const LEGACY_SNAPSHOT_CONFIG_KEY = 'config.json';
+const SNAPSHOT_CONFIG_KEY = '.flowpilot/config.json';
+
 /** 分析结果 */
 export interface HistoryAnalysis {
   /** 建议字符串列表 */
@@ -313,6 +317,14 @@ async function safeRead(p: string, fallback: string): Promise<string> {
   try { return await readFile(p, 'utf-8'); } catch { return fallback; }
 }
 
+function resolvePersistentConfigPath(basePath: string): string {
+  return join(basePath, ...PERSISTENT_CONFIG_PATH);
+}
+
+function readSnapshotConfig(snapshot: FilesSnapshot): string | null {
+  return snapshot.files[SNAPSHOT_CONFIG_KEY] ?? snapshot.files[LEGACY_SNAPSHOT_CONFIG_KEY] ?? null;
+}
+
 /** 已知 config 参数名 */
 const KNOWN_PARAMS = ['maxRetries', 'timeout', 'parallelLimit', 'verifyTimeout'] as const;
 
@@ -386,11 +398,11 @@ export async function experiment(
   const log: ExperimentLog = { timestamp: new Date().toISOString(), experiments: [], status: 'completed' };
   if (!report.experiments.length) return log;
 
-  const configPath = join(basePath, '.workflow', 'config.json');
+  const configPath = resolvePersistentConfigPath(basePath);
 
   // 预快照：实验前保存完整文件内容
   const configSnapshot = await safeRead(configPath, '{}');
-  const snapshotFile = await saveSnapshot(basePath, { 'config.json': configSnapshot });
+  const snapshotFile = await saveSnapshot(basePath, { [SNAPSHOT_CONFIG_KEY]: configSnapshot });
   log.snapshotFile = snapshotFile;
 
   try {
@@ -463,7 +475,7 @@ export async function review(basePath: string): Promise<ReviewResult> {
   let rollbackReason: string | undefined;
 
   const historyDir = join(basePath, '.flowpilot', 'history');
-  const configPath = join(basePath, '.workflow', 'config.json');
+  const configPath = resolvePersistentConfigPath(basePath);
   const expPath = join(basePath, '.flowpilot', 'evolution', 'experiments.json');
 
   // 1. 加载历史（最近两轮）
@@ -533,8 +545,10 @@ export async function review(basePath: string): Promise<ReviewResult> {
         try { snapshot = JSON.parse(await readFile(firstExp.snapshotFile, 'utf-8')); } catch { /* fallback below */ }
       }
       if (!snapshot) snapshot = await loadLatestSnapshot(basePath);
-      if (snapshot) {
-        if (snapshot.files['config.json']) await writeFile(configPath, snapshot.files['config.json'], 'utf-8');
+      const snapshotConfig = snapshot ? readSnapshotConfig(snapshot) : null;
+      if (snapshotConfig !== null) {
+        await mkdir(dirname(configPath), { recursive: true });
+        await writeFile(configPath, snapshotConfig, 'utf-8');
       }
       // 标记最近实验为 skipped
       if (logs.length) {
