@@ -18,10 +18,14 @@ const TASKS_MD = `# 验证语义测试
 `;
 
 async function completeWorkflow(service: WorkflowService): Promise<void> {
+  await completeWorkflowWithoutReview(service);
+  await service.review();
+}
+
+async function completeWorkflowWithoutReview(service: WorkflowService): Promise<void> {
   await service.init(TASKS_MD);
   await service.next();
   await service.checkpoint('001', '完成任务');
-  await service.review();
 }
 
 beforeEach(async () => {
@@ -35,6 +39,30 @@ afterEach(async () => {
 });
 
 describe('WorkflowService finish verification messaging', () => {
+  it('首次 finish 在 review 前保留 验证通过 哨兵文本', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    vi.spyOn(repo, 'verify').mockReturnValue({
+      passed: true,
+      status: 'passed',
+      scripts: ['npm run build', 'npm run test -- --run'],
+      steps: [
+        { command: 'npm run build', status: 'passed' },
+        { command: 'npm run test -- --run', status: 'skipped', reason: '未找到测试文件' },
+      ],
+    } as any);
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await completeWorkflowWithoutReview(svc);
+
+    const msg = await svc.finish();
+
+    expect(msg).toContain('验证通过');
+    expect(msg).toContain('验证结果:');
+    expect(msg).toContain('通过: npm run build');
+    expect(msg).toContain('跳过: npm run test -- --run（未找到测试文件）');
+    expect(msg).toContain('请派子Agent执行 code-review');
+    expect(msg).not.toContain('验证通过: npm run build, npm run test -- --run');
+  });
+
   it('区分 passed、skipped 与 not found 的验证步骤', async () => {
     const repo = new FsWorkflowRepository(dir);
     vi.spyOn(repo, 'commit').mockReturnValue({ status: 'skipped', reason: 'no-files' });

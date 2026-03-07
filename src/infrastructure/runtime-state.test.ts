@@ -90,6 +90,10 @@ describe('runtime-state shared metadata', () => {
           { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'create hook' }] },
           { matcher: 'TaskUpdate', hooks: [{ type: 'prompt', prompt: 'update hook' }] },
         ],
+        settingsBaseline: {
+          exists: true,
+          rawContent: '{"model":"opus"}\n',
+        },
       },
       gitignore: {
         created: false,
@@ -103,6 +107,9 @@ describe('runtime-state shared metadata', () => {
         preToolUse: [
           { matcher: 'TaskList', hooks: [{ type: 'prompt', prompt: 'list hook' }] },
         ],
+        settingsBaseline: {
+          exists: false,
+        },
       },
     });
 
@@ -118,6 +125,10 @@ describe('runtime-state shared metadata', () => {
           { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'create hook' }] },
           { matcher: 'TaskUpdate', hooks: [{ type: 'prompt', prompt: 'update hook' }] },
         ],
+        settingsBaseline: {
+          exists: true,
+          rawContent: '{"model":"opus"}\n',
+        },
       },
       gitignore: {
         created: false,
@@ -137,6 +148,10 @@ describe('runtime-state shared metadata', () => {
           { matcher: 'TaskList', hooks: [{ type: 'prompt', prompt: 'list hook' }] },
           { matcher: 'TaskUpdate', hooks: [{ type: 'prompt', prompt: 'update hook' }] },
         ],
+        settingsBaseline: {
+          exists: true,
+          rawContent: '{"model":"opus"}\n',
+        },
       },
       gitignore: {
         created: false,

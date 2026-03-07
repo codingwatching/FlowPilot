@@ -950,9 +950,25 @@ function cleanupHookSettings(settings, manifest) {
   if (hooksManifest.created && Object.keys(nextSettings).length === 0) {
     return { effect: "delete" };
   }
-  const serializedNext = JSON.stringify(nextSettings, null, 2) + "\n";
   const serializedCurrent = JSON.stringify(settings, null, 2) + "\n";
+  const baselineRaw = hooksManifest.settingsBaseline?.rawContent;
+  if (hooksManifest.settingsBaseline?.exists && baselineRaw !== void 0) {
+    try {
+      const parsedBaseline = JSON.parse(baselineRaw);
+      if (JSON.stringify(parsedBaseline) === JSON.stringify(nextSettings)) {
+        return baselineRaw === serializedCurrent ? { effect: "noop" } : { effect: "write", content: baselineRaw };
+      }
+    } catch {
+    }
+  }
+  const serializedNext = JSON.stringify(nextSettings, null, 2) + "\n";
   return serializedNext === serializedCurrent ? { effect: "noop" } : { effect: "write", content: serializedNext };
+}
+function isExactFileSnapshotEqual(snapshot, current) {
+  if (!snapshot) return false;
+  if (snapshot.exists !== current.exists) return false;
+  if (!snapshot.exists) return true;
+  return snapshot.rawContent === current.rawContent;
 }
 function cleanupGitignoreContent(content, manifest) {
   const gitignore = manifest.gitignore;
@@ -988,6 +1004,19 @@ var FsWorkflowRepository = class {
   evolutionDir;
   configDir;
   base;
+  async snapshotExactFile(path) {
+    try {
+      return {
+        exists: true,
+        rawContent: await (0, import_promises2.readFile)(path, "utf-8")
+      };
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return { exists: false };
+      }
+      throw error;
+    }
+  }
   constructor(basePath2) {
     this.base = basePath2;
     this.root = (0, import_path2.join)(basePath2, LEGACY_RUNTIME_DIR);
@@ -1209,15 +1238,19 @@ var FsWorkflowRepository = class {
   async ensureHooks() {
     const dir = (0, import_path2.join)(this.base, ".claude");
     const path = (0, import_path2.join)(dir, "settings.json");
+    const settingsBaseline = await this.snapshotExactFile(path);
     let settings = {};
     let created = false;
     try {
-      const parsed = JSON.parse(await (0, import_promises2.readFile)(path, "utf-8"));
+      const parsed = JSON.parse(settingsBaseline.rawContent ?? "");
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !Object.prototype.hasOwnProperty.call(parsed, "__proto__") && !Object.prototype.hasOwnProperty.call(parsed, "constructor")) {
         settings = parsed;
       }
     } catch (error) {
-      if (error?.code === "ENOENT") created = true;
+      if (error?.code === "ENOENT" || !settingsBaseline.exists) created = true;
+    }
+    if (!settingsBaseline.exists) {
+      created = true;
     }
     const requiredPreToolUse = [hookEntry("TaskCreate"), hookEntry("TaskUpdate"), hookEntry("TaskList")];
     const currentHooks = settings.hooks;
@@ -1240,7 +1273,8 @@ var FsWorkflowRepository = class {
       await mergeSetupInjectionManifest(this.base, {
         hooks: {
           created,
-          preToolUse: missingPreToolUse
+          preToolUse: missingPreToolUse,
+          settingsBaseline
         }
       });
     }
@@ -1366,6 +1400,15 @@ var FsWorkflowRepository = class {
       }
     } catch {
     }
+  }
+  async doesSettingsResidueMatchBaseline() {
+    const manifest = await loadSetupInjectionManifest(this.base);
+    const hooksManifest = manifest.hooks;
+    if (!hooksManifest) return true;
+    const baseline = hooksManifest.settingsBaseline;
+    if (!baseline) return false;
+    const current = await this.snapshotExactFile((0, import_path2.join)(this.base, ".claude", "settings.json"));
+    return isExactFileSnapshotEqual(baseline, current);
   }
   tag(taskId) {
     return tagTask(taskId, this.base);
@@ -3519,7 +3562,6 @@ function isExplicitFailureCheckpoint(detail) {
   return CHECKPOINT_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 var CANONICAL_SETUP_NON_COMMITTABLE_FILES = ["CLAUDE.md", ".gitignore"];
-var FINISH_VISIBLE_RUNTIME_RESIDUE_FILES = /* @__PURE__ */ new Set([".claude/settings.json"]);
 var WorkflowService = class {
   constructor(repo2, parse) {
     this.repo = repo2;
@@ -3867,17 +3909,16 @@ ${detail}
     const setupOwnedFiles = [.../* @__PURE__ */ new Set([...CANONICAL_SETUP_NON_COMMITTABLE_FILES, ...persistedSetupOwnedFiles])];
     const setupOwnedSet = new Set(setupOwnedFiles);
     await this.repo.cleanupInjections();
-    const currentDirtyFiles = this.repo.listChangedFiles();
-    const finishVisibleRuntimeResidueFiles = [...new Set(currentDirtyFiles.filter((file) => FINISH_VISIBLE_RUNTIME_RESIDUE_FILES.has(file)))];
-    if (finishVisibleRuntimeResidueFiles.length > 0) {
+    if (!await this.repo.doesSettingsResidueMatchBaseline()) {
       return {
         ok: false,
         message: [
           "\u62D2\u7EDD\u6700\u7EC8\u63D0\u4EA4\uFF1Asetup-owned \u6587\u4EF6\u5728\u7CBE\u786E cleanup \u540E\u4ECD\u6709\u7528\u6237\u6B8B\u7559\u6539\u52A8\u3002",
-          ...finishVisibleRuntimeResidueFiles.map((file) => `- ${file}`)
+          "- .claude/settings.json"
         ].join("\n")
       };
     }
+    const currentDirtyFiles = this.repo.listChangedFiles();
     const comparison = compareDirtyFilesAgainstBaseline(currentDirtyFiles, baseline?.files ?? []);
     const explainableOwnedSet = /* @__PURE__ */ new Set([...setupOwnedFiles, ...checkpointOwnedFiles]);
     if (!baseline) {

@@ -3,7 +3,7 @@
  * @description 文件系统仓储 - 基于 .workflow/.flowpilot 目录的分层记忆存储
  */
 
-import { mkdir, readFile, writeFile, unlink, rm, rename, readdir, stat } from 'fs/promises';
+import { mkdir, readFile, writeFile, unlink, rm, rename, readdir, stat, access } from 'fs/promises';
 import { join } from 'path';
 import { openSync, closeSync, writeFileSync } from 'fs';
 import { hostname } from 'os';
@@ -23,7 +23,7 @@ import {
   parseRuntimeLock,
   serializeRuntimeLock,
 } from './runtime-state';
-import type { HookEntry, SetupInjectionManifest } from './runtime-state';
+import type { ExactFileSnapshot, HookEntry, SetupInjectionManifest } from './runtime-state';
 
 const PERSISTENT_DIR = '.flowpilot';
 const LEGACY_RUNTIME_DIR = '.workflow';
@@ -104,6 +104,11 @@ function hookEntry(matcher: string): HookEntry {
   };
 }
 
+type CleanupEffect =
+  | { effect: 'noop' }
+  | { effect: 'write'; content: string }
+  | { effect: 'delete' };
+
 function dedupeHookEntries(entries: HookEntry[]): HookEntry[] {
   const seen = new Set<string>();
   const result: HookEntry[] = [];
@@ -118,32 +123,50 @@ function dedupeHookEntries(entries: HookEntry[]): HookEntry[] {
   return result;
 }
 
-function cleanupClaudeContent(content: string, manifest: SetupInjectionManifest): string | null {
-  const claude = manifest.claudeMd;
-  if (!claude) return null;
+function isHookEntry(value: unknown): value is HookEntry {
+  return Boolean(value)
+    && typeof value === 'object'
+    && typeof (value as HookEntry).matcher === 'string'
+    && Array.isArray((value as HookEntry).hooks)
+    && (value as HookEntry).hooks.every(hook => Boolean(hook) && typeof hook.type === 'string' && typeof hook.prompt === 'string');
+}
 
-  let next = content;
-  if (claude.block.length > 0 && next.includes(claude.block)) {
-    next = next.replace(claude.block, '');
-  } else {
-    next = next.replace(/\n*<!-- flowpilot:start -->[\s\S]*?<!-- flowpilot:end -->\n*/g, '\n');
+function serializeHookEntry(entry: HookEntry): string {
+  return JSON.stringify({
+    matcher: entry.matcher,
+    hooks: entry.hooks.map(hook => ({ type: hook.type, prompt: hook.prompt })),
+  });
+}
+
+function normalizeCleanupContent(content: string): string {
+  if (content.trim().length === 0) {
+    return '';
+  }
+  return content.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+}
+
+function cleanupClaudeContent(content: string, manifest: SetupInjectionManifest): CleanupEffect {
+  const claude = manifest.claudeMd;
+  if (!claude || claude.block.length === 0 || !content.includes(claude.block)) {
+    return { effect: 'noop' };
   }
 
+  let next = content.replace(claude.block, '');
   if (claude.created && claude.scaffold && next.startsWith(claude.scaffold)) {
     next = next.slice(claude.scaffold.length);
   }
 
-  next = next.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
-  if (next.trim().length === 0) {
-    return '';
+  const normalized = normalizeCleanupContent(next);
+  if (normalized.length === 0) {
+    return { effect: 'delete' };
   }
 
-  return next.trimEnd() + '\n';
+  return normalized === content ? { effect: 'noop' } : { effect: 'write', content: normalized };
 }
 
-function cleanupHookSettings(settings: Record<string, unknown>, manifest: SetupInjectionManifest): Record<string, unknown> | null {
+function cleanupHookSettings(settings: Record<string, unknown>, manifest: SetupInjectionManifest): CleanupEffect {
   const hooksManifest = manifest.hooks;
-  if (!hooksManifest) return null;
+  if (!hooksManifest) return { effect: 'noop' };
 
   const settingsHooks = settings.hooks;
   const hooks = settingsHooks && typeof settingsHooks === 'object' && !Array.isArray(settingsHooks)
@@ -151,10 +174,22 @@ function cleanupHookSettings(settings: Record<string, unknown>, manifest: SetupI
     : {};
   const currentPreToolUse = hooks.PreToolUse;
   const existingPreToolUse = Array.isArray(currentPreToolUse)
-    ? currentPreToolUse.filter((entry): entry is HookEntry => Boolean(entry) && typeof entry === 'object' && typeof (entry as HookEntry).matcher === 'string' && Array.isArray((entry as HookEntry).hooks))
+    ? currentPreToolUse.filter(isHookEntry)
     : [];
-  const ownedMatchers = new Set(hooksManifest.preToolUse.map(entry => entry.matcher));
-  const remainingPreToolUse = existingPreToolUse.filter(entry => !ownedMatchers.has(entry.matcher));
+
+  const ownedCounts = hooksManifest.preToolUse.reduce<Map<string, number>>((counts, entry) => {
+    const key = serializeHookEntry(entry);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
+
+  const remainingPreToolUse = existingPreToolUse.filter((entry) => {
+    const key = serializeHookEntry(entry);
+    const remaining = ownedCounts.get(key) ?? 0;
+    if (remaining === 0) return true;
+    ownedCounts.set(key, remaining - 1);
+    return false;
+  });
 
   const nextHooks: Record<string, unknown> = { ...hooks };
   if (remainingPreToolUse.length > 0) {
@@ -170,16 +205,35 @@ function cleanupHookSettings(settings: Record<string, unknown>, manifest: SetupI
     delete nextSettings.hooks;
   }
 
-  if (hooksManifest.created) {
-    return Object.keys(nextSettings).length > 0 ? nextSettings : null;
+  if (hooksManifest.created && Object.keys(nextSettings).length === 0) {
+    return { effect: 'delete' };
   }
 
-  return nextSettings;
+  const serializedCurrent = JSON.stringify(settings, null, 2) + '\n';
+  const baselineRaw = hooksManifest.settingsBaseline?.rawContent;
+  if (hooksManifest.settingsBaseline?.exists && baselineRaw !== undefined) {
+    try {
+      const parsedBaseline = JSON.parse(baselineRaw);
+      if (JSON.stringify(parsedBaseline) === JSON.stringify(nextSettings)) {
+        return baselineRaw === serializedCurrent ? { effect: 'noop' } : { effect: 'write', content: baselineRaw };
+      }
+    } catch {}
+  }
+
+  const serializedNext = JSON.stringify(nextSettings, null, 2) + '\n';
+  return serializedNext === serializedCurrent ? { effect: 'noop' } : { effect: 'write', content: serializedNext };
 }
 
-function cleanupGitignoreContent(content: string, manifest: SetupInjectionManifest): string | null {
+function isExactFileSnapshotEqual(snapshot: ExactFileSnapshot | undefined, current: ExactFileSnapshot): boolean {
+  if (!snapshot) return false;
+  if (snapshot.exists !== current.exists) return false;
+  if (!snapshot.exists) return true;
+  return snapshot.rawContent === current.rawContent;
+}
+
+function cleanupGitignoreContent(content: string, manifest: SetupInjectionManifest): CleanupEffect {
   const gitignore = manifest.gitignore;
-  if (!gitignore) return null;
+  if (!gitignore) return { effect: 'noop' };
 
   let removed = false;
   const remainingLines = content
@@ -192,15 +246,23 @@ function cleanupGitignoreContent(content: string, manifest: SetupInjectionManife
       return true;
     });
 
+  if (!removed) {
+    return { effect: 'noop' };
+  }
+
   while (remainingLines.length > 0 && remainingLines[remainingLines.length - 1] === '') {
     remainingLines.pop();
   }
 
   if (gitignore.created && remainingLines.length === 0) {
-    return '';
+    return { effect: 'delete' };
   }
 
-  return remainingLines.length > 0 ? `${remainingLines.join('\n')}\n` : '';
+  const normalized = remainingLines.length > 0 ? `${remainingLines.join('\n')}\n` : '';
+  if (normalized.length === 0) {
+    return { effect: 'delete' };
+  }
+  return normalized === content ? { effect: 'noop' } : { effect: 'write', content: normalized };
 }
 
 export class FsWorkflowRepository implements WorkflowRepository {
@@ -210,6 +272,20 @@ export class FsWorkflowRepository implements WorkflowRepository {
   private readonly evolutionDir: string;
   private readonly configDir: string;
   private readonly base: string;
+
+  private async snapshotExactFile(path: string): Promise<ExactFileSnapshot> {
+    try {
+      return {
+        exists: true,
+        rawContent: await readFile(path, 'utf-8'),
+      };
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') {
+        return { exists: false };
+      }
+      throw error;
+    }
+  }
 
   constructor(basePath: string) {
     this.base = basePath;
@@ -453,11 +529,12 @@ export class FsWorkflowRepository implements WorkflowRepository {
   async ensureHooks(): Promise<boolean> {
     const dir = join(this.base, '.claude');
     const path = join(dir, 'settings.json');
+    const settingsBaseline = await this.snapshotExactFile(path);
 
     let settings: Record<string, unknown> = {};
     let created = false;
     try {
-      const parsed = JSON.parse(await readFile(path, 'utf-8'));
+      const parsed = JSON.parse(settingsBaseline.rawContent ?? '');
       if (
         parsed
         && typeof parsed === 'object'
@@ -468,7 +545,10 @@ export class FsWorkflowRepository implements WorkflowRepository {
         settings = parsed;
       }
     } catch (error: any) {
-      if (error?.code === 'ENOENT') created = true;
+      if (error?.code === 'ENOENT' || !settingsBaseline.exists) created = true;
+    }
+    if (!settingsBaseline.exists) {
+      created = true;
     }
 
     const requiredPreToolUse = [hookEntry('TaskCreate'), hookEntry('TaskUpdate'), hookEntry('TaskList')];
@@ -501,6 +581,7 @@ export class FsWorkflowRepository implements WorkflowRepository {
         hooks: {
           created,
           preToolUse: missingPreToolUse,
+          settingsBaseline,
         },
       });
     }
@@ -610,10 +691,10 @@ export class FsWorkflowRepository implements WorkflowRepository {
     try {
       const content = await readFile(mdPath, 'utf-8');
       const cleaned = cleanupClaudeContent(content, manifest);
-      if (cleaned === '') {
+      if (cleaned.effect === 'delete') {
         await unlink(mdPath);
-      } else if (typeof cleaned === 'string' && cleaned !== content) {
-        await writeFile(mdPath, cleaned, 'utf-8');
+      } else if (cleaned.effect === 'write') {
+        await writeFile(mdPath, cleaned.content, 'utf-8');
       }
     } catch {}
 
@@ -622,10 +703,10 @@ export class FsWorkflowRepository implements WorkflowRepository {
       const parsed = JSON.parse(await readFile(settingsPath, 'utf-8'));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         const cleaned = cleanupHookSettings(parsed as Record<string, unknown>, manifest);
-        if (cleaned === null) {
+        if (cleaned.effect === 'delete') {
           await unlink(settingsPath);
-        } else {
-          await writeFile(settingsPath, JSON.stringify(cleaned, null, 2) + '\n', 'utf-8');
+        } else if (cleaned.effect === 'write') {
+          await writeFile(settingsPath, cleaned.content, 'utf-8');
         }
       }
     } catch {}
@@ -634,12 +715,24 @@ export class FsWorkflowRepository implements WorkflowRepository {
     try {
       const content = await readFile(gitignorePath, 'utf-8');
       const cleaned = cleanupGitignoreContent(content, manifest);
-      if (cleaned === '') {
+      if (cleaned.effect === 'delete') {
         await unlink(gitignorePath);
-      } else if (typeof cleaned === 'string' && cleaned !== content) {
-        await writeFile(gitignorePath, cleaned, 'utf-8');
+      } else if (cleaned.effect === 'write') {
+        await writeFile(gitignorePath, cleaned.content, 'utf-8');
       }
     } catch {}
+  }
+
+  async doesSettingsResidueMatchBaseline(): Promise<boolean> {
+    const manifest = await loadSetupInjectionManifest(this.base);
+    const hooksManifest = manifest.hooks;
+    if (!hooksManifest) return true;
+
+    const baseline = hooksManifest.settingsBaseline;
+    if (!baseline) return false;
+
+    const current = await this.snapshotExactFile(join(this.base, '.claude', 'settings.json'));
+    return isExactFileSnapshotEqual(baseline, current);
   }
 
   tag(taskId: string): string | null { return tagTask(taskId, this.base); }

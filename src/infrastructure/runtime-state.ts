@@ -55,6 +55,12 @@ export interface HookEntry {
   hooks: Array<{ type: string; prompt: string }>;
 }
 
+/** 文件系统精确快照：记录是否存在以及原始文本 */
+export interface ExactFileSnapshot {
+  exists: boolean;
+  rawContent?: string;
+}
+
 /** CLAUDE.md 注入清理信息 */
 export interface ClaudeMdInjectionState {
   created: boolean;
@@ -66,6 +72,7 @@ export interface ClaudeMdInjectionState {
 export interface HooksInjectionState {
   created: boolean;
   preToolUse: HookEntry[];
+  settingsBaseline?: ExactFileSnapshot;
 }
 
 /** .gitignore 注入清理信息 */
@@ -175,6 +182,12 @@ function isHookEntry(value: unknown): value is HookEntry {
   return value.hooks.every(hook => isRecord(hook) && typeof hook.type === 'string' && typeof hook.prompt === 'string');
 }
 
+function isExactFileSnapshot(value: unknown): value is ExactFileSnapshot {
+  return isRecord(value)
+    && typeof value.exists === 'boolean'
+    && (value.rawContent === undefined || typeof value.rawContent === 'string');
+}
+
 function isClaudeMdInjectionState(value: unknown): value is ClaudeMdInjectionState {
   return isRecord(value)
     && typeof value.created === 'boolean'
@@ -186,7 +199,8 @@ function isHooksInjectionState(value: unknown): value is HooksInjectionState {
   return isRecord(value)
     && typeof value.created === 'boolean'
     && Array.isArray(value.preToolUse)
-    && value.preToolUse.every(isHookEntry);
+    && value.preToolUse.every(isHookEntry)
+    && (value.settingsBaseline === undefined || isExactFileSnapshot(value.settingsBaseline));
 }
 
 function isGitignoreInjectionState(value: unknown): value is GitignoreInjectionState {
@@ -244,6 +258,16 @@ function normalizeSetupInjectionManifest(manifest: SetupInjectionManifest): Setu
     normalized.hooks = {
       created: manifest.hooks.created,
       preToolUse: dedupeHookEntries(manifest.hooks.preToolUse),
+      ...(manifest.hooks.settingsBaseline
+        ? {
+          settingsBaseline: {
+            exists: manifest.hooks.settingsBaseline.exists,
+            ...(manifest.hooks.settingsBaseline.rawContent !== undefined
+              ? { rawContent: manifest.hooks.settingsBaseline.rawContent }
+              : {}),
+          },
+        }
+        : {}),
     };
   }
 
@@ -580,6 +604,7 @@ export async function mergeSetupInjectionManifest(
             ...(current.hooks?.preToolUse ?? []),
             ...patch.hooks.preToolUse,
           ],
+          settingsBaseline: current.hooks?.settingsBaseline ?? patch.hooks.settingsBaseline,
         },
       }
       : {}),

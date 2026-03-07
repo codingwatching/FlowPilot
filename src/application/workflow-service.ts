@@ -15,7 +15,7 @@ import { extractAll } from '../infrastructure/extractor';
 import { truncateHeadTail, computeMaxChars } from '../infrastructure/truncation';
 import { detect as detectLoop, type LoopDetection } from '../infrastructure/loop-detector';
 import { startHeartbeat, runHeartbeat } from '../infrastructure/heartbeat';
-import { collectOwnedFiles, compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, loadOwnedFiles, recordOwnedFiles, recordTaskActivations, saveDirtyBaseline } from '../infrastructure/runtime-state';
+import { collectOwnedFiles, compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, loadOwnedFiles, loadSetupOwnedFiles, recordOwnedFiles, recordTaskActivations, saveDirtyBaseline, saveSetupOwnedFiles } from '../infrastructure/runtime-state';
 import { writeFile, readFile, unlink, mkdir } from 'fs/promises';
 import { join } from 'path';
 
@@ -30,6 +30,8 @@ function isExplicitFailureCheckpoint(detail: string): boolean {
   const normalized = detail.trim();
   return CHECKPOINT_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
+
+const CANONICAL_SETUP_NON_COMMITTABLE_FILES = ['CLAUDE.md', '.gitignore'] as const;
 
 export class WorkflowService {
   private stopHeartbeat: (() => void) | null = null;
@@ -105,9 +107,11 @@ export class WorkflowService {
     await this.repo.saveTasks(tasksMd);
     await this.repo.saveSummary(`# ${def.name}\n\n${def.description}\n`);
     await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
-    await this.repo.ensureClaudeMd();
-    await this.repo.ensureHooks();
-    await this.repo.ensureClaudeWorktreesIgnored();
+    const setupOwnedFiles: string[] = [];
+    if (await this.repo.ensureClaudeMd()) setupOwnedFiles.push('CLAUDE.md');
+    if (await this.repo.ensureHooks()) setupOwnedFiles.push('.claude/settings.json');
+    if (await this.repo.ensureClaudeWorktreesIgnored()) setupOwnedFiles.push('.gitignore');
+    await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
 
     // 历史经验分析：读取历史统计，输出建议，自动调整参数
     await this.applyHistoryInsights();
@@ -435,11 +439,28 @@ export class WorkflowService {
 
   /** 计算 finish 的 workflow-owned 提交边界，必要时拒绝最终提交 */
   private async resolveFinishCommitFiles(): Promise<{ ok: true; files: string[] } | { ok: false; message: string }> {
-    const currentDirtyFiles = this.repo.listChangedFiles();
     const baseline = await loadDirtyBaseline(this.repo.projectRoot());
+    const checkpointOwnedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
+    const checkpointOwnedSet = new Set(checkpointOwnedFiles);
+    const persistedSetupOwnedFiles = (await loadSetupOwnedFiles(this.repo.projectRoot())).files;
+    const setupOwnedFiles = [...new Set([...CANONICAL_SETUP_NON_COMMITTABLE_FILES, ...persistedSetupOwnedFiles])];
+    const setupOwnedSet = new Set(setupOwnedFiles);
+
+    await this.repo.cleanupInjections();
+
+    if (!(await this.repo.doesSettingsResidueMatchBaseline())) {
+      return {
+        ok: false,
+        message: [
+          '拒绝最终提交：setup-owned 文件在精确 cleanup 后仍有用户残留改动。',
+          '- .claude/settings.json',
+        ].join('\n'),
+      };
+    }
+
+    const currentDirtyFiles = this.repo.listChangedFiles();
     const comparison = compareDirtyFilesAgainstBaseline(currentDirtyFiles, baseline?.files ?? []);
-    const ownedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
-    const ownedSet = new Set(ownedFiles);
+    const explainableOwnedSet = new Set([...setupOwnedFiles, ...checkpointOwnedFiles]);
 
     if (!baseline) {
       return {
@@ -451,28 +472,30 @@ export class WorkflowService {
       };
     }
 
-    if (comparison.preservedBaselineFiles.length > 0) {
-      return {
-        ok: false,
-        message: [
-          '拒绝最终提交：工作流启动前已有脏文件，finish 不能越权将其纳入最终提交。',
-          ...comparison.preservedBaselineFiles.map(file => `- ${file}`),
-        ].join('\n'),
-      };
-    }
+    const unexplainedDirtyFiles = comparison.newDirtyFiles.filter(file => !explainableOwnedSet.has(file));
 
-    const unownedDirtyFiles = comparison.newDirtyFiles.filter(file => !ownedSet.has(file));
-    if (unownedDirtyFiles.length > 0) {
+    if (unexplainedDirtyFiles.length > 0) {
       return {
         ok: false,
         message: [
           '拒绝最终提交：检测到未归属给 workflow checkpoint 的脏文件。',
-          ...unownedDirtyFiles.map(file => `- ${file}`),
+          ...unexplainedDirtyFiles.map(file => `- ${file}`),
         ].join('\n'),
       };
     }
 
-    const finishFiles = comparison.newDirtyFiles.filter(file => ownedSet.has(file));
+    const leftoverSetupOwnedFiles = comparison.newDirtyFiles.filter(file => setupOwnedSet.has(file));
+    if (leftoverSetupOwnedFiles.length > 0) {
+      return {
+        ok: false,
+        message: [
+          '拒绝最终提交：setup-owned 文件在精确 cleanup 后仍有用户残留改动。',
+          ...leftoverSetupOwnedFiles.map(file => `- ${file}`),
+        ].join('\n'),
+      };
+    }
+
+    const finishFiles = comparison.newDirtyFiles.filter(file => checkpointOwnedSet.has(file) && !setupOwnedSet.has(file));
     return { ok: true, files: finishFiles };
   }
 
@@ -581,6 +604,11 @@ export class WorkflowService {
     const failed = data.tasks.filter(t => t.status === 'failed');
     const stats = [`${done.length} done`, skipped.length ? `${skipped.length} skipped` : '', failed.length ? `${failed.length} failed` : ''].filter(Boolean).join(', ');
 
+    const finishBoundary = await this.resolveFinishCommitFiles();
+    if (!finishBoundary.ok) {
+      return `${verifySummary}\n${stats}\n${finishBoundary.message}`;
+    }
+
     const titles = done.map(t => `- ${t.id}: ${t.title}`).join('\n');
     await runLifecycleHook('onWorkflowFinish', this.repo.projectRoot(), { WORKFLOW_NAME: data.name });
 
@@ -614,12 +642,6 @@ export class WorkflowService {
       changedConfigKeys,
     });
 
-    const finishBoundary = await this.resolveFinishCommitFiles();
-    if (!finishBoundary.ok) {
-      return `${verifySummary}\n${stats}\n${evolutionSummary}\n${finishBoundary.message}`;
-    }
-
-    await this.repo.cleanupInjections();
     this.repo.cleanTags();
     const commitResult = this.repo.commit('finish', data.name || '工作流完成', `${stats}\n\n${titles}`, finishBoundary.files);
     if (commitResult.status !== 'failed') {

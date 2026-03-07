@@ -169,6 +169,39 @@ describe('FsWorkflowRepository', () => {
     expect(content).not.toContain('flowpilot:start');
   });
 
+  it('cleanupInjections 在注入块被编辑后保持 CLAUDE.md 不变', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# Custom\n\n', 'utf-8');
+    await repo.ensureClaudeMd();
+    const path = join(dir, 'CLAUDE.md');
+    const original = await readFile(path, 'utf-8');
+    const edited = original.replace('FlowPilot Workflow Protocol', 'FlowPilot Workflow Protocol (edited)');
+    expect(edited).not.toBe(original);
+    await writeFile(path, edited, 'utf-8');
+
+    await repo.cleanupInjections();
+
+    expect(await readFile(path, 'utf-8')).toBe(edited);
+    expect(await readFile(path, 'utf-8')).toContain('flowpilot:start');
+  });
+
+  it('cleanupInjections 在缺少 hook manifest 时保留现有 settings.json', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const original = JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'user task create hook' }] },
+          { matcher: 'TaskUpdate', hooks: [{ type: 'prompt', prompt: 'user task update hook' }] },
+          { matcher: 'TaskList', hooks: [{ type: 'prompt', prompt: 'user task list hook' }] },
+        ],
+      },
+    }, null, 2) + '\n';
+    await writeFile(join(dir, '.claude', 'settings.json'), original, 'utf-8');
+
+    await repo.cleanupInjections();
+
+    expect(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8')).toBe(original);
+  });
+
   it('cleanupInjections 不移除 hooks', async () => {
     await mkdir(join(dir, '.claude'), { recursive: true });
     await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
@@ -183,6 +216,28 @@ describe('FsWorkflowRepository', () => {
     const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
     expect(settings.hooks.PreToolUse).toHaveLength(1);
     expect(settings.hooks.PreToolUse[0].matcher).toBe('OtherTool');
+  });
+
+  it('cleanupInjections 仅移除完全匹配的 hook 条目并保留同 matcher 的自定义 hook', async () => {
+    await repo.ensureHooks();
+    const settingsPath = join(dir, '.claude', 'settings.json');
+    const settings = JSON.parse(await readFile(settingsPath, 'utf-8'));
+    settings.hooks.PreToolUse = settings.hooks.PreToolUse.map((entry: { matcher: string; hooks: Array<{ type: string; prompt: string }> }) => (
+      entry.matcher === 'TaskCreate'
+        ? { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'user customized create hook' }] }
+        : entry
+    ));
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+
+    await repo.cleanupInjections();
+
+    expect(JSON.parse(await readFile(settingsPath, 'utf-8'))).toEqual({
+      hooks: {
+        PreToolUse: [
+          { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'user customized create hook' }] },
+        ],
+      },
+    });
   });
 
   it('cleanupInjections 删除由 FlowPilot 创建且无用户内容的文件', async () => {
@@ -312,6 +367,24 @@ describe('FsWorkflowRepository', () => {
     expect(settings.model).toBe('opus');
     expect(preToolUse.map(entry => entry.matcher)).toEqual(['TaskCreate', 'OtherTool', 'TaskUpdate', 'TaskList']);
     expect(preToolUse.filter(entry => entry.matcher === 'TaskCreate')).toHaveLength(1);
+  });
+
+  it('ensureHooks records the earliest exact settings baseline and cleanup compares against it', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const settingsPath = join(dir, '.claude', 'settings.json');
+    const baselineContent = '{"model":"opus","theme":"dark"}\n';
+    await writeFile(settingsPath, baselineContent, 'utf-8');
+
+    await repo.ensureHooks();
+    await writeFile(settingsPath, JSON.stringify({ model: 'sonnet' }, null, 2) + '\n', 'utf-8');
+    await repo.ensureHooks();
+    await repo.cleanupInjections();
+
+    expect(await readFile(settingsPath, 'utf-8')).toBe('{\n  "model": "sonnet"\n}\n');
+    await expect(repo.doesSettingsResidueMatchBaseline()).resolves.toBe(false);
+
+    await writeFile(settingsPath, baselineContent, 'utf-8');
+    await expect(repo.doesSettingsResidueMatchBaseline()).resolves.toBe(true);
   });
 
   it('lock/unlock 基本流程', async () => {
