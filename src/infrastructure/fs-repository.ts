@@ -18,9 +18,12 @@ import {
   getRuntimeLocalityToken,
   isRuntimeLockOwnedByProcess,
   isRuntimeLockStale,
+  loadSetupInjectionManifest,
+  mergeSetupInjectionManifest,
   parseRuntimeLock,
   serializeRuntimeLock,
 } from './runtime-state';
+import type { HookEntry, SetupInjectionManifest } from './runtime-state';
 
 const PERSISTENT_DIR = '.flowpilot';
 const LEGACY_RUNTIME_DIR = '.workflow';
@@ -92,6 +95,112 @@ async function loadProtocolTemplate(basePath: string): Promise<string> {
     } catch {}
   }
   return PROTOCOL_TEMPLATE;
+}
+
+function hookEntry(matcher: string): HookEntry {
+  return {
+    matcher,
+    hooks: [{ type: 'prompt', prompt: 'BLOCK this tool call. FlowPilot requires using node flow.js commands instead of native task tools.' }],
+  };
+}
+
+function dedupeHookEntries(entries: HookEntry[]): HookEntry[] {
+  const seen = new Set<string>();
+  const result: HookEntry[] = [];
+  for (const entry of entries) {
+    if (seen.has(entry.matcher)) continue;
+    seen.add(entry.matcher);
+    result.push({
+      matcher: entry.matcher,
+      hooks: entry.hooks.map(hook => ({ type: hook.type, prompt: hook.prompt })),
+    });
+  }
+  return result;
+}
+
+function cleanupClaudeContent(content: string, manifest: SetupInjectionManifest): string | null {
+  const claude = manifest.claudeMd;
+  if (!claude) return null;
+
+  let next = content;
+  if (claude.block.length > 0 && next.includes(claude.block)) {
+    next = next.replace(claude.block, '');
+  } else {
+    next = next.replace(/\n*<!-- flowpilot:start -->[\s\S]*?<!-- flowpilot:end -->\n*/g, '\n');
+  }
+
+  if (claude.created && claude.scaffold && next.startsWith(claude.scaffold)) {
+    next = next.slice(claude.scaffold.length);
+  }
+
+  next = next.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
+  if (next.trim().length === 0) {
+    return '';
+  }
+
+  return next.trimEnd() + '\n';
+}
+
+function cleanupHookSettings(settings: Record<string, unknown>, manifest: SetupInjectionManifest): Record<string, unknown> | null {
+  const hooksManifest = manifest.hooks;
+  if (!hooksManifest) return null;
+
+  const settingsHooks = settings.hooks;
+  const hooks = settingsHooks && typeof settingsHooks === 'object' && !Array.isArray(settingsHooks)
+    ? settingsHooks as Record<string, unknown>
+    : {};
+  const currentPreToolUse = hooks.PreToolUse;
+  const existingPreToolUse = Array.isArray(currentPreToolUse)
+    ? currentPreToolUse.filter((entry): entry is HookEntry => Boolean(entry) && typeof entry === 'object' && typeof (entry as HookEntry).matcher === 'string' && Array.isArray((entry as HookEntry).hooks))
+    : [];
+  const ownedMatchers = new Set(hooksManifest.preToolUse.map(entry => entry.matcher));
+  const remainingPreToolUse = existingPreToolUse.filter(entry => !ownedMatchers.has(entry.matcher));
+
+  const nextHooks: Record<string, unknown> = { ...hooks };
+  if (remainingPreToolUse.length > 0) {
+    nextHooks.PreToolUse = remainingPreToolUse;
+  } else {
+    delete nextHooks.PreToolUse;
+  }
+
+  const nextSettings: Record<string, unknown> = { ...settings };
+  if (Object.keys(nextHooks).length > 0) {
+    nextSettings.hooks = nextHooks;
+  } else {
+    delete nextSettings.hooks;
+  }
+
+  if (hooksManifest.created) {
+    return Object.keys(nextSettings).length > 0 ? nextSettings : null;
+  }
+
+  return nextSettings;
+}
+
+function cleanupGitignoreContent(content: string, manifest: SetupInjectionManifest): string | null {
+  const gitignore = manifest.gitignore;
+  if (!gitignore) return null;
+
+  let removed = false;
+  const remainingLines = content
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (!removed && line.trimEnd() === gitignore.rule) {
+        removed = true;
+        return false;
+      }
+      return true;
+    });
+
+  while (remainingLines.length > 0 && remainingLines[remainingLines.length - 1] === '') {
+    remainingLines.pop();
+  }
+
+  if (gitignore.created && remainingLines.length === 0) {
+    return '';
+  }
+
+  return remainingLines.length > 0 ? `${remainingLines.join('\n')}\n` : '';
 }
 
 export class FsWorkflowRepository implements WorkflowRepository {
@@ -320,13 +429,24 @@ export class FsWorkflowRepository implements WorkflowRepository {
     const path = join(base, 'CLAUDE.md');
     const marker = '<!-- flowpilot:start -->';
     const block = (await loadProtocolTemplate(this.base)).trim();
+    let created = false;
+    let scaffold = '';
     try {
       const content = await readFile(path, 'utf-8');
       if (content.includes(marker)) return false;
       await writeFile(path, content.trimEnd() + '\n\n' + block + '\n', 'utf-8');
     } catch {
-      await writeFile(path, '# Project\n\n' + block + '\n', 'utf-8');
+      created = true;
+      scaffold = '# Project\n\n';
+      await writeFile(path, `${scaffold}${block}\n`, 'utf-8');
     }
+    await mergeSetupInjectionManifest(this.base, {
+      claudeMd: {
+        created,
+        block,
+        ...(created ? { scaffold } : {}),
+      },
+    });
     return true;
   }
 
@@ -335,6 +455,7 @@ export class FsWorkflowRepository implements WorkflowRepository {
     const path = join(dir, 'settings.json');
 
     let settings: Record<string, unknown> = {};
+    let created = false;
     try {
       const parsed = JSON.parse(await readFile(path, 'utf-8'));
       if (
@@ -346,43 +467,50 @@ export class FsWorkflowRepository implements WorkflowRepository {
       ) {
         settings = parsed;
       }
-    } catch {}
+    } catch (error: any) {
+      if (error?.code === 'ENOENT') created = true;
+    }
 
-    const hook = (matcher: string) => ({
-      matcher,
-      hooks: [{ type: 'prompt' as const, prompt: 'BLOCK this tool call. FlowPilot requires using node flow.js commands instead of native task tools.' }]
-    });
-    const requiredPreToolUse = [hook('TaskCreate'), hook('TaskUpdate'), hook('TaskList')];
+    const requiredPreToolUse = [hookEntry('TaskCreate'), hookEntry('TaskUpdate'), hookEntry('TaskList')];
     const currentHooks = settings.hooks;
     const hooks = currentHooks && typeof currentHooks === 'object' && !Array.isArray(currentHooks)
       ? currentHooks as Record<string, unknown>
       : {};
     const currentPreToolUse = hooks.PreToolUse;
     const existingPreToolUse = Array.isArray(currentPreToolUse)
-      ? currentPreToolUse as Array<{ matcher?: string }>
+      ? currentPreToolUse as HookEntry[]
       : [];
     const existingMatchers = new Set(existingPreToolUse
       .map(entry => entry.matcher)
       .filter((matcher): matcher is string => Boolean(matcher)));
     const missingPreToolUse = requiredPreToolUse.filter(entry => !existingMatchers.has(entry.matcher));
-    if (!missingPreToolUse.length) return false;
+    if (!created && !missingPreToolUse.length) return false;
 
     const nextSettings = {
       ...settings,
       hooks: {
         ...hooks,
-        PreToolUse: [...existingPreToolUse, ...missingPreToolUse],
+        PreToolUse: dedupeHookEntries([...existingPreToolUse, ...missingPreToolUse]),
       },
     };
 
     await this.ensure(dir);
     await writeFile(path, JSON.stringify(nextSettings, null, 2) + '\n', 'utf-8');
+    if (missingPreToolUse.length > 0 || created) {
+      await mergeSetupInjectionManifest(this.base, {
+        hooks: {
+          created,
+          preToolUse: missingPreToolUse,
+        },
+      });
+    }
     return true;
   }
 
   async ensureClaudeWorktreesIgnored(): Promise<boolean> {
     const path = join(this.base, '.gitignore');
     const rule = '.claude/worktrees/';
+    let created = false;
 
     try {
       const content = await readFile(path, 'utf-8');
@@ -393,10 +521,23 @@ export class FsWorkflowRepository implements WorkflowRepository {
         ? `${rule}\n`
         : `${content}${content.endsWith('\n') ? '' : '\n'}${rule}\n`;
       await writeFile(path, nextContent, 'utf-8');
+      await mergeSetupInjectionManifest(this.base, {
+        gitignore: {
+          created: false,
+          rule,
+        },
+      });
       return true;
     } catch (error: any) {
       if (error?.code !== 'ENOENT') throw error;
+      created = true;
       await writeFile(path, `${rule}\n`, 'utf-8');
+      await mergeSetupInjectionManifest(this.base, {
+        gitignore: {
+          created,
+          rule,
+        },
+      });
       return true;
     }
   }
@@ -461,13 +602,43 @@ export class FsWorkflowRepository implements WorkflowRepository {
     await rename(path + '.tmp', path);
   }
 
-  /** 清理注入的 CLAUDE.md 协议块；运行期不回写 .claude/* */
+  /** 清理注入的 CLAUDE.md 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
   async cleanupInjections(): Promise<void> {
+    const manifest = await loadSetupInjectionManifest(this.base);
+
     const mdPath = join(this.base, 'CLAUDE.md');
     try {
       const content = await readFile(mdPath, 'utf-8');
-      const cleaned = content.replace(/\n*<!-- flowpilot:start -->[\s\S]*?<!-- flowpilot:end -->\n*/g, '\n');
-      if (cleaned !== content) await writeFile(mdPath, cleaned.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n', 'utf-8');
+      const cleaned = cleanupClaudeContent(content, manifest);
+      if (cleaned === '') {
+        await unlink(mdPath);
+      } else if (typeof cleaned === 'string' && cleaned !== content) {
+        await writeFile(mdPath, cleaned, 'utf-8');
+      }
+    } catch {}
+
+    const settingsPath = join(this.base, '.claude', 'settings.json');
+    try {
+      const parsed = JSON.parse(await readFile(settingsPath, 'utf-8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const cleaned = cleanupHookSettings(parsed as Record<string, unknown>, manifest);
+        if (cleaned === null) {
+          await unlink(settingsPath);
+        } else {
+          await writeFile(settingsPath, JSON.stringify(cleaned, null, 2) + '\n', 'utf-8');
+        }
+      }
+    } catch {}
+
+    const gitignorePath = join(this.base, '.gitignore');
+    try {
+      const content = await readFile(gitignorePath, 'utf-8');
+      const cleaned = cleanupGitignoreContent(content, manifest);
+      if (cleaned === '') {
+        await unlink(gitignorePath);
+      } else if (typeof cleaned === 'string' && cleaned !== content) {
+        await writeFile(gitignorePath, cleaned, 'utf-8');
+      }
     } catch {}
   }
 

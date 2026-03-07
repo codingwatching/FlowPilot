@@ -161,18 +161,106 @@ describe('FsWorkflowRepository', () => {
   });
 
   it('cleanupInjections 移除 CLAUDE.md 协议块', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# Custom\n\n', 'utf-8');
     await repo.ensureClaudeMd();
     await repo.cleanupInjections();
     const content = await readFile(join(dir, 'CLAUDE.md'), 'utf-8');
+    expect(content).toBe('# Custom\n');
     expect(content).not.toContain('flowpilot:start');
   });
 
   it('cleanupInjections 不移除 hooks', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'keep me' }] },
+        ],
+      },
+    }, null, 2) + '\n', 'utf-8');
     await repo.ensureHooks();
     await repo.cleanupInjections();
     const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
-    expect(settings.hooks.PreToolUse).toHaveLength(3);
-    expect(settings.hooks.PreToolUse[0].matcher).toBe('TaskCreate');
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].matcher).toBe('OtherTool');
+  });
+
+  it('cleanupInjections 删除由 FlowPilot 创建且无用户内容的文件', async () => {
+    await repo.ensureClaudeMd();
+    await repo.ensureHooks();
+    await repo.ensureClaudeWorktreesIgnored();
+
+    await repo.cleanupInjections();
+
+    expect(existsSync(join(dir, 'CLAUDE.md'))).toBe(false);
+    expect(existsSync(join(dir, '.claude', 'settings.json'))).toBe(false);
+    expect(existsSync(join(dir, '.gitignore'))).toBe(false);
+  });
+
+  it('cleanupInjections 仅移除预存文件中的 FlowPilot 注入内容', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# Custom\n\nKeep me.\n', 'utf-8');
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
+      model: 'opus',
+      hooks: {
+        PreToolUse: [
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'keep me' }] },
+        ],
+      },
+    }, null, 2) + '\n', 'utf-8');
+    await writeFile(join(dir, '.gitignore'), 'node_modules/\ncustom.log\n', 'utf-8');
+
+    await repo.ensureClaudeMd();
+    await repo.ensureHooks();
+    await repo.ensureClaudeWorktreesIgnored();
+    await repo.cleanupInjections();
+
+    expect(await readFile(join(dir, 'CLAUDE.md'), 'utf-8')).toBe('# Custom\n\nKeep me.\n');
+    expect(JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'))).toEqual({
+      model: 'opus',
+      hooks: {
+        PreToolUse: [
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'keep me' }] },
+        ],
+      },
+    });
+    expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe('node_modules/\ncustom.log\n');
+  });
+
+  it('cleanupInjections 仅在无用户内容时删除 FlowPilot 创建的文件', async () => {
+    await repo.ensureClaudeMd();
+    await repo.ensureHooks();
+    await repo.ensureClaudeWorktreesIgnored();
+
+    await writeFile(join(dir, 'CLAUDE.md'), `${await readFile(join(dir, 'CLAUDE.md'), 'utf-8')}User note\n`, 'utf-8');
+    const settingsPath = join(dir, '.claude', 'settings.json');
+    const settings = JSON.parse(await readFile(settingsPath, 'utf-8'));
+    await writeFile(settingsPath, JSON.stringify({
+      ...settings,
+      model: 'sonnet',
+      hooks: {
+        ...settings.hooks,
+        PreToolUse: [
+          ...settings.hooks.PreToolUse,
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'user hook' }] },
+        ],
+      },
+    }, null, 2) + '\n', 'utf-8');
+    await writeFile(join(dir, '.gitignore'), `${await readFile(join(dir, '.gitignore'), 'utf-8')}dist/\n`, 'utf-8');
+
+    await repo.cleanupInjections();
+
+    expect(await readFile(join(dir, 'CLAUDE.md'), 'utf-8')).toContain('User note');
+    expect(await readFile(join(dir, 'CLAUDE.md'), 'utf-8')).not.toContain('flowpilot:start');
+    expect(JSON.parse(await readFile(settingsPath, 'utf-8'))).toEqual({
+      model: 'sonnet',
+      hooks: {
+        PreToolUse: [
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'user hook' }] },
+        ],
+      },
+    });
+    expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe('dist/\n');
   });
 
   it('history 保存和加载', async () => {

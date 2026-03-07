@@ -12,8 +12,12 @@ import {
   recordTaskActivations,
   saveDirtyBaseline,
   loadOwnedFiles,
+  loadSetupOwnedFiles,
   recordOwnedFiles,
+  saveSetupOwnedFiles,
   collectOwnedFiles,
+  loadSetupInjectionManifest,
+  mergeSetupInjectionManifest,
 } from './runtime-state';
 
 let dir: string;
@@ -73,6 +77,75 @@ describe('runtime-state lock metadata', () => {
 });
 
 describe('runtime-state shared metadata', () => {
+  it('mergeSetupInjectionManifest stores exact cleanup ownership details', async () => {
+    const first = await mergeSetupInjectionManifest(dir, {
+      claudeMd: {
+        created: true,
+        block: '<!-- flowpilot:start -->\nblock\n<!-- flowpilot:end -->',
+        scaffold: '# Project\n\n',
+      },
+      hooks: {
+        created: true,
+        preToolUse: [
+          { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'create hook' }] },
+          { matcher: 'TaskUpdate', hooks: [{ type: 'prompt', prompt: 'update hook' }] },
+        ],
+      },
+      gitignore: {
+        created: false,
+        rule: '.claude/worktrees/',
+      },
+    });
+
+    const second = await mergeSetupInjectionManifest(dir, {
+      hooks: {
+        created: false,
+        preToolUse: [
+          { matcher: 'TaskList', hooks: [{ type: 'prompt', prompt: 'list hook' }] },
+        ],
+      },
+    });
+
+    expect(first).toEqual({
+      claudeMd: {
+        created: true,
+        block: '<!-- flowpilot:start -->\nblock\n<!-- flowpilot:end -->',
+        scaffold: '# Project\n\n',
+      },
+      hooks: {
+        created: true,
+        preToolUse: [
+          { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'create hook' }] },
+          { matcher: 'TaskUpdate', hooks: [{ type: 'prompt', prompt: 'update hook' }] },
+        ],
+      },
+      gitignore: {
+        created: false,
+        rule: '.claude/worktrees/',
+      },
+    });
+    expect(second).toEqual({
+      claudeMd: {
+        created: true,
+        block: '<!-- flowpilot:start -->\nblock\n<!-- flowpilot:end -->',
+        scaffold: '# Project\n\n',
+      },
+      hooks: {
+        created: true,
+        preToolUse: [
+          { matcher: 'TaskCreate', hooks: [{ type: 'prompt', prompt: 'create hook' }] },
+          { matcher: 'TaskList', hooks: [{ type: 'prompt', prompt: 'list hook' }] },
+          { matcher: 'TaskUpdate', hooks: [{ type: 'prompt', prompt: 'update hook' }] },
+        ],
+      },
+      gitignore: {
+        created: false,
+        rule: '.claude/worktrees/',
+      },
+    });
+    await expect(loadSetupInjectionManifest(dir)).resolves.toEqual(second);
+  });
+
   it('recordOwnedFiles persists normalized checkpoint-owned files by task', async () => {
     const first = await recordOwnedFiles(dir, '001', [
       './src/app.ts',
@@ -103,6 +176,23 @@ describe('runtime-state shared metadata', () => {
       'docs/guide.md',
       'src/app.ts',
     ]);
+  });
+
+  it('saveSetupOwnedFiles persists explainable setup-owned files separately from checkpoint-owned files', async () => {
+    const first = await saveSetupOwnedFiles(dir, [
+      'CLAUDE.md',
+      './.gitignore',
+      '.claude/settings.json',
+      '.workflow/progress.md',
+    ]);
+
+    expect(first).toEqual({
+      files: ['.gitignore', 'CLAUDE.md'],
+    });
+    await expect(loadSetupOwnedFiles(dir)).resolves.toEqual({
+      files: ['.gitignore', 'CLAUDE.md'],
+    });
+    await expect(loadOwnedFiles(dir)).resolves.toEqual({ byTask: {} });
   });
 
   it('recordTaskActivations persists activation metadata for later readers', async () => {

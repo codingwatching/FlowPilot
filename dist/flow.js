@@ -430,6 +430,8 @@ var RUNTIME_DIR = ".workflow";
 var ACTIVATED_FILE = "activated.json";
 var DIRTY_BASELINE_FILE = "dirty-baseline.json";
 var OWNED_FILES_FILE = "owned-files.json";
+var SETUP_OWNED_FILES_FILE = "setup-owned.json";
+var INJECTIONS_FILE = "injections.json";
 var RUNTIME_PATH_PREFIXES = [".flowpilot/", ".workflow/"];
 var RUNTIME_FILES = /* @__PURE__ */ new Set([".claude/settings.json"]);
 function isRecord(value) {
@@ -464,12 +466,71 @@ function normalizeDirtyFiles(files) {
 function isOwnedFilesState(value) {
   return isRecord(value) && isRecord(value.byTask);
 }
+function isSetupOwnedState(value) {
+  return isRecord(value) && Array.isArray(value.files);
+}
+function isHookEntry(value) {
+  if (!isRecord(value) || typeof value.matcher !== "string" || !Array.isArray(value.hooks)) {
+    return false;
+  }
+  return value.hooks.every((hook) => isRecord(hook) && typeof hook.type === "string" && typeof hook.prompt === "string");
+}
+function isClaudeMdInjectionState(value) {
+  return isRecord(value) && typeof value.created === "boolean" && typeof value.block === "string" && (value.scaffold === void 0 || typeof value.scaffold === "string");
+}
+function isHooksInjectionState(value) {
+  return isRecord(value) && typeof value.created === "boolean" && Array.isArray(value.preToolUse) && value.preToolUse.every(isHookEntry);
+}
+function isGitignoreInjectionState(value) {
+  return isRecord(value) && typeof value.created === "boolean" && typeof value.rule === "string";
+}
+function isSetupInjectionManifest(value) {
+  return isRecord(value) && (value.claudeMd === void 0 || isClaudeMdInjectionState(value.claudeMd)) && (value.hooks === void 0 || isHooksInjectionState(value.hooks)) && (value.gitignore === void 0 || isGitignoreInjectionState(value.gitignore));
+}
+function normalizeSetupOwnedState(state) {
+  return {
+    files: normalizeDirtyFiles(state.files.filter((file) => typeof file === "string"))
+  };
+}
 function normalizeOwnedFilesState(state) {
   return {
     byTask: Object.fromEntries(
       Object.entries(state.byTask).filter(([taskId]) => taskId.trim().length > 0).map(([taskId, files]) => [taskId, normalizeDirtyFiles(Array.isArray(files) ? files.filter((file) => typeof file === "string") : [])])
     )
   };
+}
+function dedupeHookEntries(entries) {
+  const byMatcher = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    byMatcher.set(entry.matcher, {
+      matcher: entry.matcher,
+      hooks: entry.hooks.map((hook) => ({ type: hook.type, prompt: hook.prompt }))
+    });
+  }
+  return [...byMatcher.values()].sort((a, b) => a.matcher.localeCompare(b.matcher));
+}
+function normalizeSetupInjectionManifest(manifest) {
+  const normalized = {};
+  if (manifest.claudeMd) {
+    normalized.claudeMd = {
+      created: manifest.claudeMd.created,
+      block: manifest.claudeMd.block,
+      ...manifest.claudeMd.scaffold !== void 0 ? { scaffold: manifest.claudeMd.scaffold } : {}
+    };
+  }
+  if (manifest.hooks) {
+    normalized.hooks = {
+      created: manifest.hooks.created,
+      preToolUse: dedupeHookEntries(manifest.hooks.preToolUse)
+    };
+  }
+  if (manifest.gitignore) {
+    normalized.gitignore = {
+      created: manifest.gitignore.created,
+      rule: manifest.gitignore.rule
+    };
+  }
+  return normalized;
 }
 function compareDirtyFilesAgainstBaseline(currentFiles, baselineFiles) {
   const normalizedCurrentFiles = normalizeDirtyFiles(currentFiles);
@@ -665,6 +726,58 @@ async function recordOwnedFiles(basePath2, taskId, files) {
   await (0, import_promises.rename)(path + ".tmp", path);
   return next;
 }
+async function loadSetupOwnedFiles(basePath2) {
+  try {
+    const parsed = JSON.parse(await (0, import_promises.readFile)(runtimePath(basePath2, SETUP_OWNED_FILES_FILE), "utf-8"));
+    if (!isSetupOwnedState(parsed)) {
+      return { files: [] };
+    }
+    return normalizeSetupOwnedState(parsed);
+  } catch {
+    return { files: [] };
+  }
+}
+async function saveSetupOwnedFiles(basePath2, files) {
+  const next = normalizeSetupOwnedState({ files });
+  await (0, import_promises.mkdir)(runtimeDir(basePath2), { recursive: true });
+  const path = runtimePath(basePath2, SETUP_OWNED_FILES_FILE);
+  await (0, import_promises.writeFile)(path + ".tmp", JSON.stringify(next), "utf-8");
+  await (0, import_promises.rename)(path + ".tmp", path);
+  return next;
+}
+async function loadSetupInjectionManifest(basePath2) {
+  try {
+    const parsed = JSON.parse(await (0, import_promises.readFile)(runtimePath(basePath2, INJECTIONS_FILE), "utf-8"));
+    if (!isSetupInjectionManifest(parsed)) {
+      return {};
+    }
+    return normalizeSetupInjectionManifest(parsed);
+  } catch {
+    return {};
+  }
+}
+async function mergeSetupInjectionManifest(basePath2, patch) {
+  const current = await loadSetupInjectionManifest(basePath2);
+  const next = normalizeSetupInjectionManifest({
+    ...current,
+    ...patch.claudeMd ? { claudeMd: patch.claudeMd } : {},
+    ...patch.gitignore ? { gitignore: patch.gitignore } : {},
+    ...patch.hooks ? {
+      hooks: {
+        created: current.hooks?.created || patch.hooks.created,
+        preToolUse: [
+          ...current.hooks?.preToolUse ?? [],
+          ...patch.hooks.preToolUse
+        ]
+      }
+    } : {}
+  });
+  await (0, import_promises.mkdir)(runtimeDir(basePath2), { recursive: true });
+  const path = runtimePath(basePath2, INJECTIONS_FILE);
+  await (0, import_promises.writeFile)(path + ".tmp", JSON.stringify(next), "utf-8");
+  await (0, import_promises.rename)(path + ".tmp", path);
+  return next;
+}
 function collectOwnedFiles(state) {
   const allFiles = Object.values(state.byTask).flatMap((files) => files);
   return normalizeDirtyFiles(allFiles);
@@ -735,6 +848,89 @@ async function loadProtocolTemplate(basePath2) {
     }
   }
   return PROTOCOL_TEMPLATE;
+}
+function hookEntry(matcher) {
+  return {
+    matcher,
+    hooks: [{ type: "prompt", prompt: "BLOCK this tool call. FlowPilot requires using node flow.js commands instead of native task tools." }]
+  };
+}
+function dedupeHookEntries2(entries) {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const entry of entries) {
+    if (seen.has(entry.matcher)) continue;
+    seen.add(entry.matcher);
+    result.push({
+      matcher: entry.matcher,
+      hooks: entry.hooks.map((hook) => ({ type: hook.type, prompt: hook.prompt }))
+    });
+  }
+  return result;
+}
+function cleanupClaudeContent(content, manifest) {
+  const claude = manifest.claudeMd;
+  if (!claude) return null;
+  let next = content;
+  if (claude.block.length > 0 && next.includes(claude.block)) {
+    next = next.replace(claude.block, "");
+  } else {
+    next = next.replace(/\n*<!-- flowpilot:start -->[\s\S]*?<!-- flowpilot:end -->\n*/g, "\n");
+  }
+  if (claude.created && claude.scaffold && next.startsWith(claude.scaffold)) {
+    next = next.slice(claude.scaffold.length);
+  }
+  next = next.replace(/^\n+/, "").replace(/\n{3,}/g, "\n\n");
+  if (next.trim().length === 0) {
+    return "";
+  }
+  return next.trimEnd() + "\n";
+}
+function cleanupHookSettings(settings, manifest) {
+  const hooksManifest = manifest.hooks;
+  if (!hooksManifest) return null;
+  const settingsHooks = settings.hooks;
+  const hooks = settingsHooks && typeof settingsHooks === "object" && !Array.isArray(settingsHooks) ? settingsHooks : {};
+  const currentPreToolUse = hooks.PreToolUse;
+  const existingPreToolUse = Array.isArray(currentPreToolUse) ? currentPreToolUse.filter((entry) => Boolean(entry) && typeof entry === "object" && typeof entry.matcher === "string" && Array.isArray(entry.hooks)) : [];
+  const ownedMatchers = new Set(hooksManifest.preToolUse.map((entry) => entry.matcher));
+  const remainingPreToolUse = existingPreToolUse.filter((entry) => !ownedMatchers.has(entry.matcher));
+  const nextHooks = { ...hooks };
+  if (remainingPreToolUse.length > 0) {
+    nextHooks.PreToolUse = remainingPreToolUse;
+  } else {
+    delete nextHooks.PreToolUse;
+  }
+  const nextSettings = { ...settings };
+  if (Object.keys(nextHooks).length > 0) {
+    nextSettings.hooks = nextHooks;
+  } else {
+    delete nextSettings.hooks;
+  }
+  if (hooksManifest.created) {
+    return Object.keys(nextSettings).length > 0 ? nextSettings : null;
+  }
+  return nextSettings;
+}
+function cleanupGitignoreContent(content, manifest) {
+  const gitignore = manifest.gitignore;
+  if (!gitignore) return null;
+  let removed = false;
+  const remainingLines = content.split(/\r?\n/).filter((line) => {
+    if (!removed && line.trimEnd() === gitignore.rule) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
+  while (remainingLines.length > 0 && remainingLines[remainingLines.length - 1] === "") {
+    remainingLines.pop();
+  }
+  if (gitignore.created && remainingLines.length === 0) {
+    return "";
+  }
+  return remainingLines.length > 0 ? `${remainingLines.join("\n")}
+` : "";
 }
 var FsWorkflowRepository = class {
   root;
@@ -940,52 +1136,71 @@ var FsWorkflowRepository = class {
     const path = (0, import_path2.join)(base, "CLAUDE.md");
     const marker = "<!-- flowpilot:start -->";
     const block = (await loadProtocolTemplate(this.base)).trim();
+    let created = false;
+    let scaffold = "";
     try {
       const content = await (0, import_promises2.readFile)(path, "utf-8");
       if (content.includes(marker)) return false;
       await (0, import_promises2.writeFile)(path, content.trimEnd() + "\n\n" + block + "\n", "utf-8");
     } catch {
-      await (0, import_promises2.writeFile)(path, "# Project\n\n" + block + "\n", "utf-8");
+      created = true;
+      scaffold = "# Project\n\n";
+      await (0, import_promises2.writeFile)(path, `${scaffold}${block}
+`, "utf-8");
     }
+    await mergeSetupInjectionManifest(this.base, {
+      claudeMd: {
+        created,
+        block,
+        ...created ? { scaffold } : {}
+      }
+    });
     return true;
   }
   async ensureHooks() {
     const dir = (0, import_path2.join)(this.base, ".claude");
     const path = (0, import_path2.join)(dir, "settings.json");
     let settings = {};
+    let created = false;
     try {
       const parsed = JSON.parse(await (0, import_promises2.readFile)(path, "utf-8"));
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && !Object.prototype.hasOwnProperty.call(parsed, "__proto__") && !Object.prototype.hasOwnProperty.call(parsed, "constructor")) {
         settings = parsed;
       }
-    } catch {
+    } catch (error) {
+      if (error?.code === "ENOENT") created = true;
     }
-    const hook = (matcher) => ({
-      matcher,
-      hooks: [{ type: "prompt", prompt: "BLOCK this tool call. FlowPilot requires using node flow.js commands instead of native task tools." }]
-    });
-    const requiredPreToolUse = [hook("TaskCreate"), hook("TaskUpdate"), hook("TaskList")];
+    const requiredPreToolUse = [hookEntry("TaskCreate"), hookEntry("TaskUpdate"), hookEntry("TaskList")];
     const currentHooks = settings.hooks;
     const hooks = currentHooks && typeof currentHooks === "object" && !Array.isArray(currentHooks) ? currentHooks : {};
     const currentPreToolUse = hooks.PreToolUse;
     const existingPreToolUse = Array.isArray(currentPreToolUse) ? currentPreToolUse : [];
     const existingMatchers = new Set(existingPreToolUse.map((entry) => entry.matcher).filter((matcher) => Boolean(matcher)));
     const missingPreToolUse = requiredPreToolUse.filter((entry) => !existingMatchers.has(entry.matcher));
-    if (!missingPreToolUse.length) return false;
+    if (!created && !missingPreToolUse.length) return false;
     const nextSettings = {
       ...settings,
       hooks: {
         ...hooks,
-        PreToolUse: [...existingPreToolUse, ...missingPreToolUse]
+        PreToolUse: dedupeHookEntries2([...existingPreToolUse, ...missingPreToolUse])
       }
     };
     await this.ensure(dir);
     await (0, import_promises2.writeFile)(path, JSON.stringify(nextSettings, null, 2) + "\n", "utf-8");
+    if (missingPreToolUse.length > 0 || created) {
+      await mergeSetupInjectionManifest(this.base, {
+        hooks: {
+          created,
+          preToolUse: missingPreToolUse
+        }
+      });
+    }
     return true;
   }
   async ensureClaudeWorktreesIgnored() {
     const path = (0, import_path2.join)(this.base, ".gitignore");
     const rule = ".claude/worktrees/";
+    let created = false;
     try {
       const content = await (0, import_promises2.readFile)(path, "utf-8");
       const hasRule = content.split(/\r?\n/).some((line) => line.trimEnd() === rule);
@@ -994,11 +1209,24 @@ var FsWorkflowRepository = class {
 ` : `${content}${content.endsWith("\n") ? "" : "\n"}${rule}
 `;
       await (0, import_promises2.writeFile)(path, nextContent, "utf-8");
+      await mergeSetupInjectionManifest(this.base, {
+        gitignore: {
+          created: false,
+          rule
+        }
+      });
       return true;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
+      created = true;
       await (0, import_promises2.writeFile)(path, `${rule}
 `, "utf-8");
+      await mergeSetupInjectionManifest(this.base, {
+        gitignore: {
+          created,
+          rule
+        }
+      });
       return true;
     }
   }
@@ -1051,13 +1279,42 @@ var FsWorkflowRepository = class {
     await (0, import_promises2.writeFile)(path + ".tmp", JSON.stringify(config, null, 2) + "\n", "utf-8");
     await (0, import_promises2.rename)(path + ".tmp", path);
   }
-  /** 清理注入的 CLAUDE.md 协议块；运行期不回写 .claude/* */
+  /** 清理注入的 CLAUDE.md 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
   async cleanupInjections() {
+    const manifest = await loadSetupInjectionManifest(this.base);
     const mdPath = (0, import_path2.join)(this.base, "CLAUDE.md");
     try {
       const content = await (0, import_promises2.readFile)(mdPath, "utf-8");
-      const cleaned = content.replace(/\n*<!-- flowpilot:start -->[\s\S]*?<!-- flowpilot:end -->\n*/g, "\n");
-      if (cleaned !== content) await (0, import_promises2.writeFile)(mdPath, cleaned.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n", "utf-8");
+      const cleaned = cleanupClaudeContent(content, manifest);
+      if (cleaned === "") {
+        await (0, import_promises2.unlink)(mdPath);
+      } else if (typeof cleaned === "string" && cleaned !== content) {
+        await (0, import_promises2.writeFile)(mdPath, cleaned, "utf-8");
+      }
+    } catch {
+    }
+    const settingsPath = (0, import_path2.join)(this.base, ".claude", "settings.json");
+    try {
+      const parsed = JSON.parse(await (0, import_promises2.readFile)(settingsPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const cleaned = cleanupHookSettings(parsed, manifest);
+        if (cleaned === null) {
+          await (0, import_promises2.unlink)(settingsPath);
+        } else {
+          await (0, import_promises2.writeFile)(settingsPath, JSON.stringify(cleaned, null, 2) + "\n", "utf-8");
+        }
+      }
+    } catch {
+    }
+    const gitignorePath = (0, import_path2.join)(this.base, ".gitignore");
+    try {
+      const content = await (0, import_promises2.readFile)(gitignorePath, "utf-8");
+      const cleaned = cleanupGitignoreContent(content, manifest);
+      if (cleaned === "") {
+        await (0, import_promises2.unlink)(gitignorePath);
+      } else if (typeof cleaned === "string" && cleaned !== content) {
+        await (0, import_promises2.writeFile)(gitignorePath, cleaned, "utf-8");
+      }
     } catch {
     }
   }
@@ -3212,6 +3469,7 @@ function isExplicitFailureCheckpoint(detail) {
   const normalized = detail.trim();
   return CHECKPOINT_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
+var CANONICAL_SETUP_NON_COMMITTABLE_FILES = ["CLAUDE.md", ".gitignore"];
 var WorkflowService = class {
   constructor(repo2, parse) {
     this.repo = repo2;
@@ -3283,9 +3541,11 @@ var WorkflowService = class {
 ${def.description}
 `);
     await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
-    await this.repo.ensureClaudeMd();
-    await this.repo.ensureHooks();
-    await this.repo.ensureClaudeWorktreesIgnored();
+    const setupOwnedFiles = [];
+    if (await this.repo.ensureClaudeMd()) setupOwnedFiles.push("CLAUDE.md");
+    if (await this.repo.ensureHooks()) setupOwnedFiles.push(".claude/settings.json");
+    if (await this.repo.ensureClaudeWorktreesIgnored()) setupOwnedFiles.push(".gitignore");
+    await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
     await this.applyHistoryInsights();
     await decayMemory(this.repo.projectRoot());
     const memories = await loadMemory(this.repo.projectRoot());
@@ -3553,8 +3813,12 @@ ${detail}
     const currentDirtyFiles = this.repo.listChangedFiles();
     const baseline = await loadDirtyBaseline(this.repo.projectRoot());
     const comparison = compareDirtyFilesAgainstBaseline(currentDirtyFiles, baseline?.files ?? []);
-    const ownedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
-    const ownedSet = new Set(ownedFiles);
+    const checkpointOwnedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
+    const checkpointOwnedSet = new Set(checkpointOwnedFiles);
+    const persistedSetupOwnedFiles = (await loadSetupOwnedFiles(this.repo.projectRoot())).files;
+    const setupOwnedFiles = [.../* @__PURE__ */ new Set([...CANONICAL_SETUP_NON_COMMITTABLE_FILES, ...persistedSetupOwnedFiles])];
+    const setupOwnedSet = new Set(setupOwnedFiles);
+    const explainableOwnedSet = /* @__PURE__ */ new Set([...setupOwnedFiles, ...checkpointOwnedFiles]);
     if (!baseline) {
       return {
         ok: false,
@@ -3564,26 +3828,17 @@ ${detail}
         ].join("\n")
       };
     }
-    if (comparison.preservedBaselineFiles.length > 0) {
-      return {
-        ok: false,
-        message: [
-          "\u62D2\u7EDD\u6700\u7EC8\u63D0\u4EA4\uFF1A\u5DE5\u4F5C\u6D41\u542F\u52A8\u524D\u5DF2\u6709\u810F\u6587\u4EF6\uFF0Cfinish \u4E0D\u80FD\u8D8A\u6743\u5C06\u5176\u7EB3\u5165\u6700\u7EC8\u63D0\u4EA4\u3002",
-          ...comparison.preservedBaselineFiles.map((file) => `- ${file}`)
-        ].join("\n")
-      };
-    }
-    const unownedDirtyFiles = comparison.newDirtyFiles.filter((file) => !ownedSet.has(file));
-    if (unownedDirtyFiles.length > 0) {
+    const unexplainedDirtyFiles = baseline.files.length === 0 ? comparison.currentFiles.filter((file) => !explainableOwnedSet.has(file)) : comparison.newDirtyFiles.filter((file) => !explainableOwnedSet.has(file));
+    if (unexplainedDirtyFiles.length > 0) {
       return {
         ok: false,
         message: [
           "\u62D2\u7EDD\u6700\u7EC8\u63D0\u4EA4\uFF1A\u68C0\u6D4B\u5230\u672A\u5F52\u5C5E\u7ED9 workflow checkpoint \u7684\u810F\u6587\u4EF6\u3002",
-          ...unownedDirtyFiles.map((file) => `- ${file}`)
+          ...unexplainedDirtyFiles.map((file) => `- ${file}`)
         ].join("\n")
       };
     }
-    const finishFiles = comparison.newDirtyFiles.filter((file) => ownedSet.has(file));
+    const finishFiles = comparison.newDirtyFiles.filter((file) => checkpointOwnedSet.has(file) && !setupOwnedSet.has(file));
     return { ok: true, files: finishFiles };
   }
   /** add: 追加任务 */
@@ -3685,6 +3940,12 @@ ${verifySummary}
     const skipped2 = data.tasks.filter((t) => t.status === "skipped");
     const failed = data.tasks.filter((t) => t.status === "failed");
     const stats = [`${done.length} done`, skipped2.length ? `${skipped2.length} skipped` : "", failed.length ? `${failed.length} failed` : ""].filter(Boolean).join(", ");
+    const finishBoundary = await this.resolveFinishCommitFiles();
+    if (!finishBoundary.ok) {
+      return `${verifySummary}
+${stats}
+${finishBoundary.message}`;
+    }
     const titles = done.map((t) => `- ${t.id}: ${t.title}`).join("\n");
     await runLifecycleHook("onWorkflowFinish", this.repo.projectRoot(), { WORKFLOW_NAME: data.name });
     const wfStats = collectStats(data);
@@ -3711,13 +3972,6 @@ ${verifySummary}
       experimentRan,
       changedConfigKeys
     });
-    const finishBoundary = await this.resolveFinishCommitFiles();
-    if (!finishBoundary.ok) {
-      return `${verifySummary}
-${stats}
-${evolutionSummary}
-${finishBoundary.message}`;
-    }
     await this.repo.cleanupInjections();
     this.repo.cleanTags();
     const commitResult = this.repo.commit("finish", data.name || "\u5DE5\u4F5C\u6D41\u5B8C\u6210", `${stats}

@@ -8,6 +8,7 @@ import { FsWorkflowRepository } from '../infrastructure/fs-repository';
 import { parseTasksMarkdown } from '../infrastructure/markdown-parser';
 import { loadMemory } from '../infrastructure/memory';
 import * as history from '../infrastructure/history';
+import * as hooks from '../infrastructure/hooks';
 import type { CommitResult } from '../domain/repository';
 
 let savedApiKey: string | undefined;
@@ -480,7 +481,7 @@ describe('WorkflowService 集成测试', () => {
     await svc.init(TASKS_MD);
     await svc.next();
 
-    const msg = await svc.checkpoint('001', '表结构设计完成', ['src/main.ts']);
+    const msg = await svc.checkpoint('001', '表结构设计完成', ['CLAUDE.md', '.gitignore', 'src/main.ts']);
     expect(msg).toContain('[已自动提交]');
   });
 
@@ -566,18 +567,57 @@ describe('WorkflowService 集成测试', () => {
     expect(await svc.status()).toBeNull();
   });
 
-  it('finish在脏启动且边界外文件仍脏时拒绝最终提交', async () => {
+  it('finish在 ownership boundary 拒绝前不运行副作用', async () => {
     const repo = new FsWorkflowRepository(dir);
     const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
-    changedFilesSpy.mockReturnValueOnce(['README.md']);
-    changedFilesSpy.mockReturnValue(['README.md', 'src/main.ts']);
-    const commitSpy = vi.spyOn(repo, 'commit');
+    changedFilesSpy.mockReturnValueOnce([]);
+    changedFilesSpy.mockReturnValue(['src/unowned.ts']);
     vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await completeWorkflow(svc);
+    await svc.review();
+
+    const hookSpy = vi.spyOn(hooks, 'runLifecycleHook');
+    const saveHistorySpy = vi.spyOn(repo, 'saveHistory');
+    const reflectSpy = vi.spyOn(history, 'reflect');
+    const experimentSpy = vi.spyOn(history, 'experiment');
+    const saveEvolutionSpy = vi.spyOn(repo, 'saveEvolution');
+    const cleanupInjectionsSpy = vi.spyOn(repo, 'cleanupInjections');
+    const commitSpy = vi.spyOn(repo, 'commit');
     const clearAllSpy = vi.spyOn(repo, 'clearAll');
+
+    const msg = await svc.finish();
+
+    expect(msg).toContain('拒绝最终提交');
+    expect(msg).toContain('src/unowned.ts');
+    expect(hookSpy).not.toHaveBeenCalled();
+    expect(saveHistorySpy).not.toHaveBeenCalled();
+    expect(reflectSpy).not.toHaveBeenCalled();
+    expect(experimentSpy).not.toHaveBeenCalled();
+    expect(saveEvolutionSpy).not.toHaveBeenCalled();
+    expect(cleanupInjectionsSpy).not.toHaveBeenCalled();
+    expect(commitSpy).not.toHaveBeenCalled();
+    expect(clearAllSpy).not.toHaveBeenCalled();
+    expect((await svc.status())?.status).toBe('finishing');
+  });
+
+  it('finish在干净启动时允许 setup-owned 脏文件可解释但不提交，即使 checkpoint 声明了这些文件', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce([]);
+    changedFilesSpy.mockReturnValue(['CLAUDE.md', '.gitignore', 'src/main.ts']);
+    const commitSpy = vi.spyOn(repo, 'commit').mockImplementation((taskId, title, summary, files) => {
+      if (taskId !== 'finish') {
+        return { status: 'skipped', reason: 'no-staged-changes' };
+      }
+      expect(files).toEqual(['src/main.ts']);
+      return { status: 'committed' };
+    });
+    vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
     svc = new WorkflowService(repo, parseTasksMarkdown);
     await svc.init(TASKS_MD);
     await svc.next();
-    await svc.checkpoint('001', '表结构设计完成', ['src/main.ts']);
+    await svc.checkpoint('001', '表结构设计完成', ['CLAUDE.md', '.gitignore', 'src/main.ts']);
     await svc.next();
     await svc.checkpoint('002', '页面完成');
     await svc.next();
@@ -585,24 +625,92 @@ describe('WorkflowService 集成测试', () => {
     await svc.review();
 
     const msg = await svc.finish();
-    expect(msg).toContain('拒绝最终提交');
-    expect(msg).toContain('README.md');
-    expect(msg).toContain('工作流启动前已有脏文件');
-    expect(commitSpy).not.toHaveBeenCalledWith('finish', expect.any(String), expect.any(String), expect.anything());
-    expect(clearAllSpy).not.toHaveBeenCalled();
-    expect((await svc.status())?.status).toBe('finishing');
+
+    expect(msg).toContain('已提交最终commit');
+    expect(msg).not.toContain('拒绝最终提交');
+    expect(commitSpy.mock.calls.at(-1)?.[0]).toBe('finish');
+    expect(await svc.status()).toBeNull();
+  });
+
+  it('finish在仓库已预先setup时仍只提交业务文件，即使 checkpoint 声明了 CLAUDE.md 和 .gitignore', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# Project\n\n<!-- flowpilot:start -->\nexisting\n', 'utf-8');
+    await writeFile(join(dir, '.gitignore'), '.claude/worktrees/\n', 'utf-8');
+
+    const repo = new FsWorkflowRepository(dir);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce([]);
+    changedFilesSpy.mockReturnValue(['CLAUDE.md', '.gitignore', 'src/main.ts']);
+    const commitSpy = vi.spyOn(repo, 'commit').mockImplementation((taskId, title, summary, files) => {
+      if (taskId !== 'finish') {
+        return { status: 'skipped', reason: 'no-staged-changes' };
+      }
+      expect(files).toEqual(['src/main.ts']);
+      return { status: 'committed' };
+    });
+    vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+
+    await svc.init(TASKS_MD);
+    expect(JSON.parse(await readFile(join(dir, '.workflow', 'setup-owned.json'), 'utf-8'))).toEqual({ files: [] });
+    await svc.next();
+    await svc.checkpoint('001', '表结构设计完成', ['CLAUDE.md', '.gitignore', 'src/main.ts']);
+    await svc.next();
+    await svc.checkpoint('002', '页面完成');
+    await svc.next();
+    await svc.checkpoint('003', '文档完成');
+    await svc.review();
+
+    const msg = await svc.finish();
+
+    expect(msg).toContain('已提交最终commit');
+    expect(msg).not.toContain('拒绝最终提交');
+    expect(commitSpy.mock.calls.at(-1)?.[0]).toBe('finish');
+    expect(await svc.status()).toBeNull();
+  });
+
+  it('finish在脏启动时允许 baseline 脏文件并只提交 owned 新改动', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce(['README.md']);
+    changedFilesSpy.mockReturnValue(['README.md', '.gitignore', 'src/main.ts']);
+    const commitSpy = vi.spyOn(repo, 'commit').mockImplementation((taskId, title, summary, files) => {
+      if (taskId !== 'finish') {
+        return { status: 'skipped', reason: 'no-staged-changes' };
+      }
+      expect(files).toEqual(['src/main.ts']);
+      return { status: 'committed' };
+    });
+    vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.checkpoint('001', '表结构设计完成', ['README.md', 'src/main.ts']);
+    await svc.next();
+    await svc.checkpoint('002', '页面完成');
+    await svc.next();
+    await svc.checkpoint('003', '文档完成');
+    await svc.review();
+
+    const msg = await svc.finish();
+
+    expect(msg).toContain('已提交最终commit');
+    expect(msg).not.toContain('拒绝最终提交');
+    expect(commitSpy.mock.calls.at(-1)?.[0]).toBe('finish');
+    expect(await svc.status()).toBeNull();
   });
 
   it('finish在存在未归属脏文件时拒绝而不是误提交', async () => {
     const repo = new FsWorkflowRepository(dir);
-    mockChangedFiles(repo, ['src/main.ts', 'src/unowned.ts']);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce(['README.md']);
+    changedFilesSpy.mockReturnValue(['README.md', '.gitignore', 'src/main.ts', 'src/unowned.ts']);
     const commitSpy = vi.spyOn(repo, 'commit');
     vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
     const clearAllSpy = vi.spyOn(repo, 'clearAll');
     svc = new WorkflowService(repo, parseTasksMarkdown);
     await svc.init(TASKS_MD);
     await svc.next();
-    await svc.checkpoint('001', '表结构设计完成', ['src/main.ts']);
+    await svc.checkpoint('001', '表结构设计完成', ['README.md', 'src/main.ts']);
     await svc.next();
     await svc.checkpoint('002', '页面完成');
     await svc.next();
@@ -634,6 +742,60 @@ describe('WorkflowService 集成测试', () => {
     expect(msg).toContain('工作流回到待命状态');
     expect(msg).not.toContain('已提交最终commit');
     expect(await svc.status()).toBeNull();
+  });
+
+  it('finish会对称清理由 setup 创建的 CLAUDE.md、settings.json 和 .gitignore', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce([]);
+    changedFilesSpy.mockReturnValue(['CLAUDE.md', '.gitignore']);
+    mockCommitResult(repo, { status: 'skipped', reason: 'no-files' });
+    vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+
+    await completeWorkflow(svc);
+    await svc.review();
+
+    await svc.finish();
+
+    expect(await svc.status()).toBeNull();
+    expect(await repo.loadProgress()).toBeNull();
+    await expect(readFile(join(dir, 'CLAUDE.md'), 'utf-8')).rejects.toThrow();
+    await expect(readFile(join(dir, '.claude', 'settings.json'), 'utf-8')).rejects.toThrow();
+    await expect(readFile(join(dir, '.gitignore'), 'utf-8')).rejects.toThrow();
+  });
+
+  it('abort仅移除预存文件中的 FlowPilot 注入内容', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# Custom\n\nKeep me.\n', 'utf-8');
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
+      model: 'opus',
+      hooks: {
+        PreToolUse: [
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'keep me' }] },
+        ],
+      },
+    }, null, 2) + '\n', 'utf-8');
+    await writeFile(join(dir, '.gitignore'), 'node_modules/\ncustom.log\n', 'utf-8');
+
+    const repo = new FsWorkflowRepository(dir);
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+    await svc.init(TASKS_MD);
+
+    const msg = await svc.abort();
+
+    expect(msg).toContain('已中止');
+    expect(await readFile(join(dir, 'CLAUDE.md'), 'utf-8')).toBe('# Custom\n\nKeep me.\n');
+    expect(JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'))).toEqual({
+      model: 'opus',
+      hooks: {
+        PreToolUse: [
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'keep me' }] },
+        ],
+      },
+    });
+    expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe('node_modules/\ncustom.log\n');
+    expect(await repo.loadProgress()).toBeNull();
   });
 
   it('finish在git失败时保留工作流并提示手动提交', async () => {

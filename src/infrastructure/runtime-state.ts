@@ -14,6 +14,8 @@ const RUNTIME_DIR = '.workflow';
 const ACTIVATED_FILE = 'activated.json';
 const DIRTY_BASELINE_FILE = 'dirty-baseline.json';
 const OWNED_FILES_FILE = 'owned-files.json';
+const SETUP_OWNED_FILES_FILE = 'setup-owned.json';
+const INJECTIONS_FILE = 'injections.json';
 const RUNTIME_PATH_PREFIXES = ['.flowpilot/', '.workflow/'];
 const RUNTIME_FILES = new Set(['.claude/settings.json']);
 
@@ -40,6 +42,43 @@ export interface DirtyBaseline {
 /** checkpoint 持久化的 workflow-owned 文件 */
 export interface OwnedFilesState {
   byTask: Record<string, string[]>;
+}
+
+/** setup/init 阶段由 FlowPilot 自身改写、可用于边界解释但不可自动提交的文件 */
+export interface SetupOwnedState {
+  files: string[];
+}
+
+/** FlowPilot 写入 settings.json 的 hook 结构 */
+export interface HookEntry {
+  matcher: string;
+  hooks: Array<{ type: string; prompt: string }>;
+}
+
+/** CLAUDE.md 注入清理信息 */
+export interface ClaudeMdInjectionState {
+  created: boolean;
+  block: string;
+  scaffold?: string;
+}
+
+/** settings.json 注入清理信息 */
+export interface HooksInjectionState {
+  created: boolean;
+  preToolUse: HookEntry[];
+}
+
+/** .gitignore 注入清理信息 */
+export interface GitignoreInjectionState {
+  created: boolean;
+  rule: string;
+}
+
+/** setup/init 阶段的精确注入 manifest */
+export interface SetupInjectionManifest {
+  claudeMd?: ClaudeMdInjectionState;
+  hooks?: HooksInjectionState;
+  gitignore?: GitignoreInjectionState;
 }
 
 /** 当前 dirty 文件相对 baseline 的对比结果 */
@@ -124,6 +163,51 @@ function isOwnedFilesState(value: unknown): value is OwnedFilesState {
   return isRecord(value) && isRecord(value.byTask);
 }
 
+function isSetupOwnedState(value: unknown): value is SetupOwnedState {
+  return isRecord(value) && Array.isArray(value.files);
+}
+
+function isHookEntry(value: unknown): value is HookEntry {
+  if (!isRecord(value) || typeof value.matcher !== 'string' || !Array.isArray(value.hooks)) {
+    return false;
+  }
+
+  return value.hooks.every(hook => isRecord(hook) && typeof hook.type === 'string' && typeof hook.prompt === 'string');
+}
+
+function isClaudeMdInjectionState(value: unknown): value is ClaudeMdInjectionState {
+  return isRecord(value)
+    && typeof value.created === 'boolean'
+    && typeof value.block === 'string'
+    && (value.scaffold === undefined || typeof value.scaffold === 'string');
+}
+
+function isHooksInjectionState(value: unknown): value is HooksInjectionState {
+  return isRecord(value)
+    && typeof value.created === 'boolean'
+    && Array.isArray(value.preToolUse)
+    && value.preToolUse.every(isHookEntry);
+}
+
+function isGitignoreInjectionState(value: unknown): value is GitignoreInjectionState {
+  return isRecord(value)
+    && typeof value.created === 'boolean'
+    && typeof value.rule === 'string';
+}
+
+function isSetupInjectionManifest(value: unknown): value is SetupInjectionManifest {
+  return isRecord(value)
+    && (value.claudeMd === undefined || isClaudeMdInjectionState(value.claudeMd))
+    && (value.hooks === undefined || isHooksInjectionState(value.hooks))
+    && (value.gitignore === undefined || isGitignoreInjectionState(value.gitignore));
+}
+
+function normalizeSetupOwnedState(state: SetupOwnedState): SetupOwnedState {
+  return {
+    files: normalizeDirtyFiles(state.files.filter((file): file is string => typeof file === 'string')),
+  };
+}
+
 function normalizeOwnedFilesState(state: OwnedFilesState): OwnedFilesState {
   return {
     byTask: Object.fromEntries(
@@ -132,6 +216,45 @@ function normalizeOwnedFilesState(state: OwnedFilesState): OwnedFilesState {
         .map(([taskId, files]) => [taskId, normalizeDirtyFiles(Array.isArray(files) ? files.filter((file): file is string => typeof file === 'string') : [])]),
     ),
   };
+}
+
+function dedupeHookEntries(entries: HookEntry[]): HookEntry[] {
+  const byMatcher = new Map<string, HookEntry>();
+  for (const entry of entries) {
+    byMatcher.set(entry.matcher, {
+      matcher: entry.matcher,
+      hooks: entry.hooks.map(hook => ({ type: hook.type, prompt: hook.prompt })),
+    });
+  }
+  return [...byMatcher.values()].sort((a, b) => a.matcher.localeCompare(b.matcher));
+}
+
+function normalizeSetupInjectionManifest(manifest: SetupInjectionManifest): SetupInjectionManifest {
+  const normalized: SetupInjectionManifest = {};
+
+  if (manifest.claudeMd) {
+    normalized.claudeMd = {
+      created: manifest.claudeMd.created,
+      block: manifest.claudeMd.block,
+      ...(manifest.claudeMd.scaffold !== undefined ? { scaffold: manifest.claudeMd.scaffold } : {}),
+    };
+  }
+
+  if (manifest.hooks) {
+    normalized.hooks = {
+      created: manifest.hooks.created,
+      preToolUse: dedupeHookEntries(manifest.hooks.preToolUse),
+    };
+  }
+
+  if (manifest.gitignore) {
+    normalized.gitignore = {
+      created: manifest.gitignore.created,
+      rule: manifest.gitignore.rule,
+    };
+  }
+
+  return normalized;
 }
 
 /** 对比当前 dirty 文件与 workflow 启动 baseline，区分历史脏文件与中断残留 */
@@ -398,6 +521,71 @@ export async function recordOwnedFiles(
   });
   await mkdir(runtimeDir(basePath), { recursive: true });
   const path = runtimePath(basePath, OWNED_FILES_FILE);
+  await writeFile(path + '.tmp', JSON.stringify(next), 'utf-8');
+  await rename(path + '.tmp', path);
+  return next;
+}
+
+/** 读取 setup-owned 文件状态，旧工作流缺失时返回空列表 */
+export async function loadSetupOwnedFiles(basePath: string): Promise<SetupOwnedState> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(runtimePath(basePath, SETUP_OWNED_FILES_FILE), 'utf-8'));
+    if (!isSetupOwnedState(parsed)) {
+      return { files: [] };
+    }
+    return normalizeSetupOwnedState(parsed);
+  } catch {
+    return { files: [] };
+  }
+}
+
+/** 持久化 setup/init 阶段的 explainable FlowPilot-owned 文件 */
+export async function saveSetupOwnedFiles(basePath: string, files: string[]): Promise<SetupOwnedState> {
+  const next = normalizeSetupOwnedState({ files });
+  await mkdir(runtimeDir(basePath), { recursive: true });
+  const path = runtimePath(basePath, SETUP_OWNED_FILES_FILE);
+  await writeFile(path + '.tmp', JSON.stringify(next), 'utf-8');
+  await rename(path + '.tmp', path);
+  return next;
+}
+
+/** 读取 setup/init 阶段的精确注入 manifest */
+export async function loadSetupInjectionManifest(basePath: string): Promise<SetupInjectionManifest> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(runtimePath(basePath, INJECTIONS_FILE), 'utf-8'));
+    if (!isSetupInjectionManifest(parsed)) {
+      return {};
+    }
+    return normalizeSetupInjectionManifest(parsed);
+  } catch {
+    return {};
+  }
+}
+
+/** 合并并持久化 setup/init 阶段的精确注入 manifest */
+export async function mergeSetupInjectionManifest(
+  basePath: string,
+  patch: SetupInjectionManifest,
+): Promise<SetupInjectionManifest> {
+  const current = await loadSetupInjectionManifest(basePath);
+  const next = normalizeSetupInjectionManifest({
+    ...current,
+    ...(patch.claudeMd ? { claudeMd: patch.claudeMd } : {}),
+    ...(patch.gitignore ? { gitignore: patch.gitignore } : {}),
+    ...(patch.hooks
+      ? {
+        hooks: {
+          created: current.hooks?.created || patch.hooks.created,
+          preToolUse: [
+            ...(current.hooks?.preToolUse ?? []),
+            ...patch.hooks.preToolUse,
+          ],
+        },
+      }
+      : {}),
+  });
+  await mkdir(runtimeDir(basePath), { recursive: true });
+  const path = runtimePath(basePath, INJECTIONS_FILE);
   await writeFile(path + '.tmp', JSON.stringify(next), 'utf-8');
   await rename(path + '.tmp', path);
   return next;
