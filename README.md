@@ -129,10 +129,12 @@ CC 会自动：拆解任务 → 识别依赖 → 并行派发子Agent → 写代
 关窗口、断网、compact、CC 崩溃，随便来：
 
 ```
-新窗口 → 说：继续任务 → flow resume → 检测到中断 → 重置未完成任务 → 继续
+新窗口 → 说：继续任务 → flow resume
+  ├─ 若无待接管变更：重置未完成任务 → 继续
+  └─ 若有待接管变更：暂停调度 → adopt / 确认并处理列出的本任务变更后 restart → 再继续
 ```
 
-所有状态持久化在文件里，不依赖对话历史。哪怕并行执行中 3 个子Agent 同时中断，恢复后全部重新派发。
+所有状态持久化在文件里，不依赖对话历史。哪怕并行执行中 3 个子Agent 同时中断，恢复后也不会盲目重派；若检测到中断后待接管变更，必须先接管，或只处理列出的本任务变更后 restart，再继续下一个任务。
 
 ### 迭代审查 — 跑完一轮再来一轮，越改越好
 
@@ -171,7 +173,7 @@ Finalization 阶段（可选）：
 | 参数 | 作用 |
 |------|------|
 | `maxRetries` | checkpoint 失败时决定重试次数 |
-| `parallelLimit` | `nextBatch` 限制并行任务数 |
+| `parallelLimit` | `nextBatch` 限制并行任务数；未设置时不做人为封顶，设为 `1` 基本等于强制串行 |
 | `hints` | 注入到子Agent上下文作为"进化建议" |
 
 - 成功时：提升并行度，优化参数
@@ -242,7 +244,7 @@ claude --dangerously-skip-permissions --continue   # 接续最近一次对话
 claude --dangerously-skip-permissions --resume     # 从历史对话列表选择
 ```
 
-如果恢复时工作区仍然有脏业务文件，`resume` 会明确告诉你哪些是启动前就存在的 baseline 脏文件，哪些是中断任务残留的新脏文件；如果 dirty baseline 缺失，也会直接说明“无法证明这是干净重启”。
+如果恢复时工作区仍然有未归档变更，`resume` 会明确告诉你哪些是启动前就存在的 baseline 未归档变更，哪些是中断后待接管的新变更；如果 dirty baseline 缺失，也会直接说明“无法证明这是干净重启”。
 
 ## 架构概览
 
@@ -378,7 +380,7 @@ node flow.js init
 
 - **任务失败** — 自动重试 3 次，3 次仍失败则标记 `failed` 并跳过
 - **级联跳过** — 依赖了失败任务的后续任务自动标记 `skipped`
-- **中断恢复** — `active` 状态的任务重置为 `pending`，从头重做；若工作区仍脏，`resume` 会明确区分 baseline 脏文件、任务残留脏文件、以及缺失 baseline 的保守警告
+- **中断恢复** — `active` 状态的任务在干净场景下会重置为 `pending`；若检测到中断后待接管变更，工作流进入 `reconciling`，必须先 `adopt`，或仅在确认并处理列出的本任务变更后 `restart`，不能直接继续派发后续任务
 - **验证失败** — `flow finish` 报错后可派子Agent修复，再次 finish
 - **最终提交拒绝** — `flow finish` 在 verify/review 之后还会检查 dirty baseline、checkpoint owned files、以及 `CLAUDE.md` / `.claude/settings.json` / `.gitignore` 的 cleanup 结果；只要边界不安全，就拒绝最终提交并列出文件
 - **循环检测** — 三策略防护（重复失败/乒乓/全局熔断），自动注入警告到下一任务

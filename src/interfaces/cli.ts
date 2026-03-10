@@ -88,6 +88,39 @@ export class CLI {
         return await s.checkpoint(id, detail.trim(), files);
       }
 
+      case 'adopt': {
+        const id = rest[0];
+        if (!id) throw new Error('需要任务ID');
+        const filesIdx = rest.indexOf('--files');
+        const fileIdx = rest.indexOf('--file');
+        let detail: string;
+        let files: string[] | undefined;
+
+        if (filesIdx >= 0) {
+          files = [];
+          for (let i = filesIdx + 1; i < rest.length && !rest[i].startsWith('--'); i++) {
+            files.push(rest[i]);
+          }
+        }
+
+        if (fileIdx >= 0 && rest[fileIdx + 1]) {
+          const filePath = resolve(rest[fileIdx + 1]);
+          if (relative(process.cwd(), filePath).startsWith('..')) throw new Error('--file 路径不能超出项目目录');
+          detail = readFileSync(filePath, 'utf-8');
+        } else if (rest.length > 1 && fileIdx < 0 && filesIdx < 0) {
+          detail = rest.slice(1).join(' ');
+        } else {
+          detail = await readStdinIfPiped();
+        }
+        return await s.adopt(id, detail.trim(), files);
+      }
+
+      case 'restart': {
+        const id = rest[0];
+        if (!id) throw new Error('需要任务ID');
+        return await s.restart(id);
+      }
+
       case 'skip': {
         const id = rest[0];
         if (!id) throw new Error('需要任务ID');
@@ -150,6 +183,8 @@ const USAGE = `用法: node flow.js [--verbose] <command>
   init [--force]       初始化工作流 (stdin传入任务markdown，无stdin则接管项目)
   next [--batch]       获取下一个待执行任务 (--batch 返回所有可并行任务)
   checkpoint <id>      记录任务完成 [--file <path> | stdin | 内联文本] [--files f1 f2 ...]
+  adopt <id>           接管中断后待接管变更并补 checkpoint [--file <path> | stdin | 内联文本] [--files f1 f2 ...]
+  restart <id>         在确认并处理列出的本任务变更后允许任务从头重做
   skip <id>            手动跳过任务
   review               标记code-review已完成 (finish前必须执行)
   finish               智能收尾 (验证+总结+回到待命，需先review)

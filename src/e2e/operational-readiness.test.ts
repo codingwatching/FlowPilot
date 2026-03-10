@@ -7,9 +7,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { access, mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const FLOW_CLI = '/home/zzz/桌面/2026开发/tools/FlowPilot/dist/flow.js';
+const FLOW_CLI = resolve(dirname(fileURLToPath(import.meta.url)), '../../dist/flow.js');
 const TASK_MARKDOWN = `# Clean Repo Smoke\n\n1. [backend] add tracked file\n  create one tracked file in a clean repo\n`;
 const SUBMODULE_TASK_MARKDOWN = `# Submodule Smoke\n\n1. [backend] advance submodule gitlink\n  advance a submodule commit and checkpoint the gitlink path\n`;
 
@@ -163,19 +164,29 @@ describe('operational readiness smoke tests', () => {
     const resumeOutput = runFlow(repoDir, ['resume']);
     expect(resumeOutput).toContain('恢复工作流: Clean Repo Smoke');
     expect(resumeOutput).toContain('进度: 0/1');
-    expect(resumeOutput).toContain('中断任务 001 已重置，将重新执行');
-    expect(resumeOutput).toContain('工作流启动前已有 1 个脏文件仍然保留:');
+    expect(resumeOutput).toContain('已暂停继续调度');
+    expect(resumeOutput).toContain('node flow.js adopt 001');
+    expect(resumeOutput).toContain('工作流启动前已有 1 个未归档变更仍然保留:');
     expect(resumeOutput).toContain('- baseline.txt');
-    expect(resumeOutput).toContain('已保留');
+    expect(resumeOutput).toContain('已保留 1 个中断后待接管变更');
     expect(resumeOutput).toContain('- residue.txt');
 
+    expect(() => runFlow(repoDir, ['next'])).toThrow(/adopt|restart|skip/);
+
+    const adoptOutput = runFlow(
+      repoDir,
+      ['adopt', '001', '--files', 'residue.txt'],
+      '[REMEMBER] adopted interrupted residue',
+    );
+    expect(adoptOutput).toContain('任务 001 完成');
+
     const statusOutput = runFlow(repoDir, ['status']);
-    expect(statusOutput).toContain('状态: running | 进度: 0/1');
-    expect(statusOutput).toContain('[ ] 001 [backend] add tracked file');
+    expect(statusOutput).toContain('状态: running | 进度: 1/1');
+    expect(statusOutput).toContain('[x] 001 [backend] add tracked file');
 
     const gitStatus = runGit(repoDir, ['status', '--short']);
     expect(gitStatus).toContain('M baseline.txt');
-    expect(gitStatus).toContain('?? residue.txt');
+    expect(gitStatus).not.toContain('?? residue.txt');
   });
 
   it('detects and commits a gitlink-only submodule update in the operational flow', async () => {

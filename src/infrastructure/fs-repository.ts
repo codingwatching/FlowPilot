@@ -29,7 +29,7 @@ const PERSISTENT_DIR = '.flowpilot';
 const LEGACY_RUNTIME_DIR = '.workflow';
 const CONFIG_FILE = 'config.json';
 
-const VALID_WORKFLOW_STATUS = new Set(['idle', 'running', 'finishing', 'completed', 'aborted']);
+const VALID_WORKFLOW_STATUS = new Set(['idle', 'running', 'reconciling', 'finishing', 'completed', 'aborted']);
 const VALID_TASK_STATUS = new Set(['pending', 'active', 'done', 'skipped', 'failed']);
 
 /** 解析 progress.md 文本为工作流状态 */
@@ -555,7 +555,7 @@ export class FsWorkflowRepository implements WorkflowRepository {
       : {};
     const currentPreToolUse = hooks.PreToolUse;
     const existingPreToolUse = Array.isArray(currentPreToolUse)
-      ? currentPreToolUse as HookEntry[]
+      ? currentPreToolUse.filter(isHookEntry)
       : [];
     const existingMatchers = new Set(existingPreToolUse
       .map(entry => entry.matcher)

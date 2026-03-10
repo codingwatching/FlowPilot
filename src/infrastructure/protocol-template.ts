@@ -6,7 +6,8 @@ export const PROTOCOL_TEMPLATE = `<!-- flowpilot:start -->
 
 ### On Session Start
 Run \`node flow.js resume\`:
-- If unfinished workflow → enter **Execution Loop** (unless user is asking an unrelated question — handle it first via **Ad-hoc Dispatch**, then remind user the workflow is paused)
+- If unfinished workflow and resume reports **reconciling** / "已暂停继续调度" → do **NOT** enter Execution Loop. First run \`node flow.js adopt <id> --files ...\`, or after confirming and handling only the listed task-owned changes run \`node flow.js restart <id>\`. Never touch baseline changes or unrelated project code.
+- If unfinished workflow and no reconcile gate → enter **Execution Loop** (unless user is asking an unrelated question — handle it first via **Ad-hoc Dispatch**, then remind user the workflow is paused)
 - If no workflow → **judge the request**: reply directly for pure chitchat, use **Ad-hoc Dispatch** for one-off tasks, or enter **Requirement Decomposition** for multi-step development work. When in doubt, prefer the heavier path.
 
 ### Ad-hoc Dispatch (one-off tasks, no workflow init)
@@ -26,7 +27,7 @@ Dispatch sub-agent(s) via Task tool. No init/checkpoint/finish needed. Iron Rule
 
 **Path A — Standard (default):**
 1. Dispatch a sub-agent to read requirement docs and return a summary.
-2. Use /superpowers:brainstorming to brainstorm and produce a task list.
+2. Use /superpowers:brainstorming to brainstorm and produce a task list. **Throughput-first rule:** minimize dependencies; only add \`deps\` for true blocking/data dependencies. Prefer wider parallel frontiers over long chains whenever safe.
 3. Pipe into init using this **exact format**:
 \`\`\`bash
 cat <<'EOF' | node flow.js init
@@ -37,7 +38,7 @@ cat <<'EOF' | node flow.js init
 3. [general] Third task (deps: 1, 2)
 EOF
 \`\`\`
-Format: \`[type]\` = frontend/backend/general, \`(deps: N)\` = dependency IDs, indented lines = description.
+Format: \`[type]\` = frontend/backend/general, \`(deps: N)\` = dependency IDs, indented lines = description. **Do not add decorative or "just to be safe" dependencies.**
 
 **Path B — OpenSpec (if \`openspec/\` directory exists AND \`openspec\` CLI is available):**
 1. Verify: run \`npx openspec --version\`. If command fails → fall back to **Path A**.
@@ -50,8 +51,8 @@ cat openspec/changes/<change-name>/tasks.md | node flow.js init
 OpenSpec checkbox format (\`- [ ] 1.1 Task\`) is auto-detected. Group N tasks depend on group N-1.
 
 ### Execution Loop
-1. Run \`node flow.js next --batch\`. **NOTE: this command will REFUSE to return tasks if any previous task is still \`active\`. You must checkpoint or resume first.**
-2. The output already contains checkpoint commands per task. For **EVERY** task in batch, dispatch a sub-agent via Task tool. **ALL Task calls in one message.** Copy the ENTIRE task block (including checkpoint commands) into each sub-agent prompt verbatim.
+1. Run \`node flow.js next --batch\`. **NOTE: this command will REFUSE to return tasks if any previous task is still \`active\`, or if the workflow is in \`reconciling\` state. In reconciling state you must adopt/restart/skip first, and restart may only follow handling of the listed task-owned changes.**
+2. The output already contains checkpoint commands per task. For **EVERY** task in batch, dispatch a sub-agent via Task tool. **ALL Task calls in one message.** Copy the ENTIRE task block (including checkpoint commands) into each sub-agent prompt verbatim. **If the batch contains N tasks, dispatch N sub-agents immediately; do not downshift to 1 for caution.**
 3. **After ALL sub-agents return**: run \`node flow.js status\`.
    - If any task is still \`active\` → sub-agent failed to checkpoint. Run fallback: \`echo 'summary from sub-agent output' | node flow.js checkpoint <id> --files file1 file2\`
    - **Do NOT call \`node flow.js next\` until zero active tasks remain** (the command will error anyway).
@@ -60,6 +61,8 @@ OpenSpec checkbox format (\`- [ ] 1.1 Task\`) is auto-detected. Group N tasks de
 
 ### Mid-Workflow Commands
 - \`node flow.js skip <id>\` — skip a stuck/unnecessary task (avoid skipping active tasks with running sub-agents)
+- \`node flow.js adopt <id> --files ...\` — adopt interrupted task-owned changes as the task result and unblock scheduling
+- \`node flow.js restart <id>\` — after confirming and handling only the listed task-owned changes, allow the task to be re-run from scratch; never touch baseline changes or unrelated code
 - \`node flow.js add <描述> [--type frontend|backend|general]\` — inject a new task mid-workflow
 
 ### Sub-Agent Prompt Template

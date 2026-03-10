@@ -330,7 +330,8 @@ var PROTOCOL_TEMPLATE = `<!-- flowpilot:start -->
 
 ### On Session Start
 Run \`node flow.js resume\`:
-- If unfinished workflow \u2192 enter **Execution Loop** (unless user is asking an unrelated question \u2014 handle it first via **Ad-hoc Dispatch**, then remind user the workflow is paused)
+- If unfinished workflow and resume reports **reconciling** / "\u5DF2\u6682\u505C\u7EE7\u7EED\u8C03\u5EA6" \u2192 do **NOT** enter Execution Loop. First run \`node flow.js adopt <id> --files ...\`, or after confirming and handling only the listed task-owned changes run \`node flow.js restart <id>\`. Never touch baseline changes or unrelated project code.
+- If unfinished workflow and no reconcile gate \u2192 enter **Execution Loop** (unless user is asking an unrelated question \u2014 handle it first via **Ad-hoc Dispatch**, then remind user the workflow is paused)
 - If no workflow \u2192 **judge the request**: reply directly for pure chitchat, use **Ad-hoc Dispatch** for one-off tasks, or enter **Requirement Decomposition** for multi-step development work. When in doubt, prefer the heavier path.
 
 ### Ad-hoc Dispatch (one-off tasks, no workflow init)
@@ -350,7 +351,7 @@ Dispatch sub-agent(s) via Task tool. No init/checkpoint/finish needed. Iron Rule
 
 **Path A \u2014 Standard (default):**
 1. Dispatch a sub-agent to read requirement docs and return a summary.
-2. Use /superpowers:brainstorming to brainstorm and produce a task list.
+2. Use /superpowers:brainstorming to brainstorm and produce a task list. **Throughput-first rule:** minimize dependencies; only add \`deps\` for true blocking/data dependencies. Prefer wider parallel frontiers over long chains whenever safe.
 3. Pipe into init using this **exact format**:
 \`\`\`bash
 cat <<'EOF' | node flow.js init
@@ -361,7 +362,7 @@ cat <<'EOF' | node flow.js init
 3. [general] Third task (deps: 1, 2)
 EOF
 \`\`\`
-Format: \`[type]\` = frontend/backend/general, \`(deps: N)\` = dependency IDs, indented lines = description.
+Format: \`[type]\` = frontend/backend/general, \`(deps: N)\` = dependency IDs, indented lines = description. **Do not add decorative or "just to be safe" dependencies.**
 
 **Path B \u2014 OpenSpec (if \`openspec/\` directory exists AND \`openspec\` CLI is available):**
 1. Verify: run \`npx openspec --version\`. If command fails \u2192 fall back to **Path A**.
@@ -374,8 +375,8 @@ cat openspec/changes/<change-name>/tasks.md | node flow.js init
 OpenSpec checkbox format (\`- [ ] 1.1 Task\`) is auto-detected. Group N tasks depend on group N-1.
 
 ### Execution Loop
-1. Run \`node flow.js next --batch\`. **NOTE: this command will REFUSE to return tasks if any previous task is still \`active\`. You must checkpoint or resume first.**
-2. The output already contains checkpoint commands per task. For **EVERY** task in batch, dispatch a sub-agent via Task tool. **ALL Task calls in one message.** Copy the ENTIRE task block (including checkpoint commands) into each sub-agent prompt verbatim.
+1. Run \`node flow.js next --batch\`. **NOTE: this command will REFUSE to return tasks if any previous task is still \`active\`, or if the workflow is in \`reconciling\` state. In reconciling state you must adopt/restart/skip first, and restart may only follow handling of the listed task-owned changes.**
+2. The output already contains checkpoint commands per task. For **EVERY** task in batch, dispatch a sub-agent via Task tool. **ALL Task calls in one message.** Copy the ENTIRE task block (including checkpoint commands) into each sub-agent prompt verbatim. **If the batch contains N tasks, dispatch N sub-agents immediately; do not downshift to 1 for caution.**
 3. **After ALL sub-agents return**: run \`node flow.js status\`.
    - If any task is still \`active\` \u2192 sub-agent failed to checkpoint. Run fallback: \`echo 'summary from sub-agent output' | node flow.js checkpoint <id> --files file1 file2\`
    - **Do NOT call \`node flow.js next\` until zero active tasks remain** (the command will error anyway).
@@ -384,6 +385,8 @@ OpenSpec checkbox format (\`- [ ] 1.1 Task\`) is auto-detected. Group N tasks de
 
 ### Mid-Workflow Commands
 - \`node flow.js skip <id>\` \u2014 skip a stuck/unnecessary task (avoid skipping active tasks with running sub-agents)
+- \`node flow.js adopt <id> --files ...\` \u2014 adopt interrupted task-owned changes as the task result and unblock scheduling
+- \`node flow.js restart <id>\` \u2014 after confirming and handling only the listed task-owned changes, allow the task to be re-run from scratch; never touch baseline changes or unrelated code
 - \`node flow.js add <\u63CF\u8FF0> [--type frontend|backend|general]\` \u2014 inject a new task mid-workflow
 
 ### Sub-Agent Prompt Template
@@ -439,6 +442,7 @@ var ACTIVATED_FILE = "activated.json";
 var DIRTY_BASELINE_FILE = "dirty-baseline.json";
 var OWNED_FILES_FILE = "owned-files.json";
 var SETUP_OWNED_FILES_FILE = "setup-owned.json";
+var RECONCILE_STATE_FILE = "reconcile-state.json";
 var INJECTIONS_FILE = "injections.json";
 var RUNTIME_PATH_PREFIXES = [".flowpilot/", ".workflow/"];
 var RUNTIME_FILES = /* @__PURE__ */ new Set([".claude/settings.json"]);
@@ -477,6 +481,9 @@ function isOwnedFilesState(value) {
 function isSetupOwnedState(value) {
   return isRecord(value) && Array.isArray(value.files);
 }
+function isReconcileState(value) {
+  return isRecord(value) && Array.isArray(value.taskIds);
+}
 function isHookEntry(value) {
   if (!isRecord(value) || typeof value.matcher !== "string" || !Array.isArray(value.hooks)) {
     return false;
@@ -501,6 +508,13 @@ function isSetupInjectionManifest(value) {
 function normalizeSetupOwnedState(state) {
   return {
     files: normalizeDirtyFiles(state.files.filter((file) => typeof file === "string"))
+  };
+}
+function normalizeReconcileState(state) {
+  return {
+    taskIds: [...new Set(
+      state.taskIds.filter((taskId) => typeof taskId === "string").map((taskId) => taskId.trim()).filter((taskId) => taskId.length > 0)
+    )]
   };
 }
 function normalizeOwnedFilesState(state) {
@@ -768,6 +782,31 @@ async function saveSetupOwnedFiles(basePath2, files) {
   await (0, import_promises.rename)(path + ".tmp", path);
   return next;
 }
+async function loadReconcileState(basePath2) {
+  try {
+    const parsed = JSON.parse(await (0, import_promises.readFile)(runtimePath(basePath2, RECONCILE_STATE_FILE), "utf-8"));
+    if (!isReconcileState(parsed)) {
+      return { taskIds: [] };
+    }
+    return normalizeReconcileState(parsed);
+  } catch {
+    return { taskIds: [] };
+  }
+}
+async function saveReconcileState(basePath2, taskIds) {
+  const next = normalizeReconcileState({ taskIds });
+  await (0, import_promises.mkdir)(runtimeDir(basePath2), { recursive: true });
+  const path = runtimePath(basePath2, RECONCILE_STATE_FILE);
+  await (0, import_promises.writeFile)(path + ".tmp", JSON.stringify(next), "utf-8");
+  await (0, import_promises.rename)(path + ".tmp", path);
+  return next;
+}
+async function clearReconcileState(basePath2) {
+  try {
+    await unlink(runtimePath(basePath2, RECONCILE_STATE_FILE));
+  } catch {
+  }
+}
 async function loadSetupInjectionManifest(basePath2) {
   try {
     const parsed = JSON.parse(await (0, import_promises.readFile)(runtimePath(basePath2, INJECTIONS_FILE), "utf-8"));
@@ -814,7 +853,7 @@ function defaultInvalidLockStaleAfterMs() {
 var PERSISTENT_DIR = ".flowpilot";
 var LEGACY_RUNTIME_DIR = ".workflow";
 var CONFIG_FILE = "config.json";
-var VALID_WORKFLOW_STATUS = /* @__PURE__ */ new Set(["idle", "running", "finishing", "completed", "aborted"]);
+var VALID_WORKFLOW_STATUS = /* @__PURE__ */ new Set(["idle", "running", "reconciling", "finishing", "completed", "aborted"]);
 var VALID_TASK_STATUS = /* @__PURE__ */ new Set(["pending", "active", "done", "skipped", "failed"]);
 function parseProgressMarkdown(raw) {
   const lines = raw.split("\n");
@@ -1260,7 +1299,7 @@ var FsWorkflowRepository = class {
     const currentHooks = settings.hooks;
     const hooks = currentHooks && typeof currentHooks === "object" && !Array.isArray(currentHooks) ? currentHooks : {};
     const currentPreToolUse = hooks.PreToolUse;
-    const existingPreToolUse = Array.isArray(currentPreToolUse) ? currentPreToolUse : [];
+    const existingPreToolUse = Array.isArray(currentPreToolUse) ? currentPreToolUse.filter(isHookEntry2) : [];
     const existingMatchers = new Set(existingPreToolUse.map((entry) => entry.matcher).filter((matcher) => Boolean(matcher)));
     const missingPreToolUse = requiredPreToolUse.filter((entry) => !existingMatchers.has(entry.matcher));
     if (!created && !missingPreToolUse.length) return false;
@@ -3621,6 +3660,92 @@ var WorkflowService = class {
     }
     return getTaskActivationAge(this.repo.projectRoot(), id);
   }
+  async loadSetupOwnedSet() {
+    const persistedSetupOwnedFiles = (await loadSetupOwnedFiles(this.repo.projectRoot())).files;
+    return /* @__PURE__ */ new Set([...CANONICAL_SETUP_NON_COMMITTABLE_FILES, ...persistedSetupOwnedFiles]);
+  }
+  async getResumeDirtyState(currentDirtyFiles = this.repo.listChangedFiles()) {
+    const baseline = await loadDirtyBaseline(this.repo.projectRoot());
+    const comparison = compareDirtyFilesAgainstBaseline(currentDirtyFiles, baseline?.files ?? []);
+    const setupOwnedSet = await this.loadSetupOwnedSet();
+    const residueFiles = (baseline ? comparison.newDirtyFiles : comparison.currentFiles).filter((file) => !setupOwnedSet.has(file));
+    if (!baseline) {
+      if (!residueFiles.length) {
+        return {
+          lines: ["\u672A\u627E\u5230 dirty baseline\uFF1B\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u672A\u5F52\u6863\u53D8\u66F4\uFF0C\u4F46\u65E0\u6CD5\u8BC1\u660E\u8FD9\u662F\u5E72\u51C0\u91CD\u542F"],
+          residueFiles,
+          baselineFound: false
+        };
+      }
+      return {
+        lines: [
+          `\u672A\u627E\u5230 dirty baseline\uFF1B\u65E0\u6CD5\u53EF\u9760\u533A\u5206\u542F\u52A8\u524D\u53D8\u66F4\u4E0E\u4E2D\u65AD\u540E\u5F85\u63A5\u7BA1\u53D8\u66F4\uFF0C\u4FDD\u5B88\u4FDD\u7559\u5F53\u524D ${residueFiles.length} \u4E2A\u672A\u5F52\u6863\u53D8\u66F4:`,
+          ...residueFiles.map((file) => `- ${file}`)
+        ],
+        residueFiles,
+        baselineFound: false
+      };
+    }
+    if (!comparison.currentFiles.length || !comparison.preservedBaselineFiles.length && !residueFiles.length) {
+      return {
+        lines: ["\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u5F85\u63A5\u7BA1\u53D8\u66F4\uFF0C\u672C\u6B21\u6062\u590D\u662F\u5E72\u51C0\u91CD\u542F"],
+        residueFiles: [],
+        baselineFound: true
+      };
+    }
+    const lines = [];
+    if (comparison.preservedBaselineFiles.length) {
+      lines.push(`\u5DE5\u4F5C\u6D41\u542F\u52A8\u524D\u5DF2\u6709 ${comparison.preservedBaselineFiles.length} \u4E2A\u672A\u5F52\u6863\u53D8\u66F4\u4ECD\u7136\u4FDD\u7559:`);
+      lines.push(...comparison.preservedBaselineFiles.map((file) => `- ${file}`));
+    }
+    if (residueFiles.length) {
+      lines.push(`\u5DF2\u4FDD\u7559 ${residueFiles.length} \u4E2A\u4E2D\u65AD\u540E\u5F85\u63A5\u7BA1\u53D8\u66F4:`);
+      lines.push(...residueFiles.map((file) => `- ${file}`));
+    }
+    return { lines, residueFiles, baselineFound: true };
+  }
+  async assertNotReconciling(data) {
+    if (data.status !== "reconciling") return;
+    const reconcile = await loadReconcileState(this.repo.projectRoot());
+    const taskText = reconcile.taskIds.length ? ` ${reconcile.taskIds.join(", ")}` : "";
+    throw new Error(`\u5F53\u524D\u5DE5\u4F5C\u6D41\u5904\u4E8E reconciling \u72B6\u6001\uFF0C\u9700\u5148\u5904\u7406\u4E2D\u65AD\u4EFB\u52A1${taskText}\u3002\u8BF7\u5148\u6267\u884C node flow.js adopt <id> --files ...\uFF0C\u6216\u5728\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E\u6267\u884C node flow.js restart <id>\u3002\u4E0D\u5F97\u5904\u7406 baseline \u53D8\u66F4\u6216\u672A\u5217\u51FA\u7684\u5176\u4ED6\u9879\u76EE\u4EE3\u7801\uFF1B\u5FC5\u8981\u65F6\u53EF node flow.js skip <id>`);
+  }
+  async finalizeSuccessfulTask(data, task, detail, files) {
+    if (!detail.trim()) throw new Error(`\u4EFB\u52A1 ${task.id} checkpoint\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A`);
+    const existingMems = (await loadMemory(this.repo.projectRoot())).filter((m) => !m.archived).map((m) => m.content);
+    const maxChars = computeMaxChars(128e3, detail);
+    const truncated = detail.length > maxChars ? truncateHeadTail(detail, maxChars) : detail;
+    const summaryLine = truncated.split("\n")[0].slice(0, 80);
+    this.locallyActivatedTaskIds.delete(task.id);
+    const newData = completeTask(data, task.id, summaryLine);
+    log.debug(`checkpoint ${task.id}: \u5B8C\u6210, summary="${summaryLine}"`);
+    await this.repo.saveProgress(newData);
+    await this.repo.saveTaskContext(task.id, `# task-${task.id}: ${task.title}
+
+${detail}
+`);
+    await recordOwnedFiles(this.repo.projectRoot(), task.id, files ?? []);
+    for (const entry of await extractAll(detail, `task-${task.id}`, existingMems)) {
+      await appendMemory(this.repo.projectRoot(), {
+        content: entry.content,
+        source: entry.source,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    const loopResult = await detect(this.repo.projectRoot(), task.id, summaryLine, false);
+    if (loopResult) {
+      log.step("loop_detected", loopResult.message, { taskId: task.id, data: { strategy: loopResult.strategy } });
+      await this.saveLoopWarning(`[LOOP WARNING - ${loopResult.strategy}] ${loopResult.message}`);
+    }
+    await this.updateSummary(newData);
+    const commitResult = this.repo.commit(task.id, task.title, summaryLine, files);
+    if (commitResult.status === "committed") this.repo.tag(task.id);
+    await runLifecycleHook("onTaskComplete", this.repo.projectRoot(), { TASK_ID: task.id, TASK_TITLE: task.title });
+    const doneCount = newData.tasks.filter((t) => t.status === "done").length;
+    let msg = `\u4EFB\u52A1 ${task.id} \u5B8C\u6210 (${doneCount}/${newData.tasks.length})`;
+    msg += this.formatCommitMessage(commitResult, "task");
+    return isAllDone(newData.tasks) ? msg + "\n\u5168\u90E8\u4EFB\u52A1\u5DF2\u5B8C\u6210\uFF0C\u8BF7\u6267\u884C node flow.js finish \u8FDB\u884C\u6536\u5C3E" : msg;
+  }
   /** init: 解析任务markdown → 生成progress/tasks */
   async init(tasksMd, force = false) {
     try {
@@ -3660,6 +3785,7 @@ var WorkflowService = class {
 
 ${def.description}
 `);
+    await clearReconcileState(this.repo.projectRoot());
     await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
     const setupOwnedFiles = [];
     if (await this.repo.ensureClaudeMd()) setupOwnedFiles.push("CLAUDE.md");
@@ -3681,6 +3807,7 @@ ${def.description}
     await this.repo.lock();
     try {
       const data = await this.requireProgress();
+      await this.assertNotReconciling(data);
       if (isAllDone(data.tasks)) return null;
       const active = data.tasks.filter((t) => t.status === "active");
       if (active.length) {
@@ -3689,6 +3816,10 @@ ${def.description}
       const cascaded = cascadeSkip(data.tasks);
       const skippedByC = cascaded.filter((t, i) => t.status === "skipped" && data.tasks[i].status !== "skipped");
       if (skippedByC.length) log.debug(`next: cascade skip ${skippedByC.map((t) => t.id).join(",")}`);
+      const parallelTasks = findParallelTasks(cascaded);
+      if (parallelTasks.length > 1) {
+        throw new Error(`\u68C0\u6D4B\u5230 ${parallelTasks.length} \u4E2A\u53EF\u5E76\u884C\u4EFB\u52A1\uFF08${parallelTasks.map((taskEntry) => taskEntry.id).join(", ")}\uFF09\uFF0C\u8BF7\u4F7F\u7528 node flow.js next --batch \u4E00\u6B21\u6027\u8FD4\u56DE\u6574\u6279\u4EFB\u52A1\u3002\u6B64\u5904\u4E32\u884C\u6D3E\u53D1\u4F1A\u964D\u4F4E\u541E\u5410\u91CF\u3002`);
+      }
       const task = findNextTask(cascaded);
       if (!task) {
         await this.repo.saveProgress({ ...data, tasks: cascaded });
@@ -3738,6 +3869,7 @@ ${loopWarning}`);
     await this.repo.lock();
     try {
       const data = await this.requireProgress();
+      await this.assertNotReconciling(data);
       if (isAllDone(data.tasks)) return [];
       const active = data.tasks.filter((t) => t.status === "active");
       if (active.length) {
@@ -3812,10 +3944,10 @@ ${loopWarning}`);
         this.locallyActivatedTaskIds.delete(id);
         await this.appendFailureContext(id, task, detail);
         const patternWarn = await this.detectFailurePattern(id, task);
-        const loopResult2 = await detect(this.repo.projectRoot(), id, detail, true);
-        if (loopResult2) {
-          log.step("loop_detected", loopResult2.message, { taskId: id, data: { strategy: loopResult2.strategy } });
-          await this.saveLoopWarning(`[LOOP WARNING - ${loopResult2.strategy}] ${loopResult2.message}`);
+        const loopResult = await detect(this.repo.projectRoot(), id, detail, true);
+        if (loopResult) {
+          log.step("loop_detected", loopResult.message, { taskId: id, data: { strategy: loopResult.strategy } });
+          await this.saveLoopWarning(`[LOOP WARNING - ${loopResult.strategy}] ${loopResult.message}`);
         }
         for (const entry of await extractAll(detail, `task-${id}-fail`, existingMems)) {
           await appendMemory(this.repo.projectRoot(), {
@@ -3826,47 +3958,15 @@ ${loopWarning}`);
         }
         const config = await this.repo.loadConfig();
         const maxRetries = config.maxRetries ?? 3;
-        const { result, data: newData2 } = failTask(data, id, maxRetries);
-        await this.repo.saveProgress(newData2);
+        const { result, data: newData } = failTask(data, id, maxRetries);
+        await this.repo.saveProgress(newData);
         log.debug(`checkpoint ${id}: failTask result=${result}, retries=${task.retries + 1}`);
-        const msg2 = result === "retry" ? `\u4EFB\u52A1 ${id} \u5931\u8D25(\u7B2C${task.retries + 1}\u6B21)\uFF0C\u5C06\u91CD\u8BD5` : `\u4EFB\u52A1 ${id} \u8FDE\u7EED\u5931\u8D25${maxRetries}\u6B21\uFF0C\u5DF2\u8DF3\u8FC7`;
-        const warns = [patternWarn, loopResult2 ? `[LOOP] ${loopResult2.message}` : null].filter(Boolean);
-        return warns.length ? `${msg2}
-${warns.join("\n")}` : msg2;
+        const msg = result === "retry" ? `\u4EFB\u52A1 ${id} \u5931\u8D25(\u7B2C${task.retries + 1}\u6B21)\uFF0C\u5C06\u91CD\u8BD5` : `\u4EFB\u52A1 ${id} \u8FDE\u7EED\u5931\u8D25${maxRetries}\u6B21\uFF0C\u5DF2\u8DF3\u8FC7`;
+        const warns = [patternWarn, loopResult ? `[LOOP] ${loopResult.message}` : null].filter(Boolean);
+        return warns.length ? `${msg}
+${warns.join("\n")}` : msg;
       }
-      if (!detail.trim()) throw new Error(`\u4EFB\u52A1 ${id} checkpoint\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A`);
-      const maxChars = computeMaxChars(128e3, detail);
-      const truncated = detail.length > maxChars ? truncateHeadTail(detail, maxChars) : detail;
-      const summaryLine = truncated.split("\n")[0].slice(0, 80);
-      this.locallyActivatedTaskIds.delete(id);
-      const newData = completeTask(data, id, summaryLine);
-      log.debug(`checkpoint ${id}: \u5B8C\u6210, summary="${summaryLine}"`);
-      await this.repo.saveProgress(newData);
-      await this.repo.saveTaskContext(id, `# task-${id}: ${task.title}
-
-${detail}
-`);
-      await recordOwnedFiles(this.repo.projectRoot(), id, files ?? []);
-      for (const entry of await extractAll(detail, `task-${id}`, existingMems)) {
-        await appendMemory(this.repo.projectRoot(), {
-          content: entry.content,
-          source: entry.source,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString()
-        });
-      }
-      const loopResult = await detect(this.repo.projectRoot(), id, summaryLine, false);
-      if (loopResult) {
-        log.step("loop_detected", loopResult.message, { taskId: id, data: { strategy: loopResult.strategy } });
-        await this.saveLoopWarning(`[LOOP WARNING - ${loopResult.strategy}] ${loopResult.message}`);
-      }
-      await this.updateSummary(newData);
-      const commitResult = this.repo.commit(id, task.title, summaryLine, files);
-      if (commitResult.status === "committed") this.repo.tag(id);
-      await runLifecycleHook("onTaskComplete", this.repo.projectRoot(), { TASK_ID: id, TASK_TITLE: task.title });
-      const doneCount = newData.tasks.filter((t) => t.status === "done").length;
-      let msg = `\u4EFB\u52A1 ${id} \u5B8C\u6210 (${doneCount}/${newData.tasks.length})`;
-      msg += this.formatCommitMessage(commitResult, "task");
-      return isAllDone(newData.tasks) ? msg + "\n\u5168\u90E8\u4EFB\u52A1\u5DF2\u5B8C\u6210\uFF0C\u8BF7\u6267\u884C node flow.js finish \u8FDB\u884C\u6536\u5C3E" : msg;
+      return await this.finalizeSuccessfulTask(data, task, detail, files);
     } finally {
       await this.repo.unlock();
     }
@@ -3880,53 +3980,110 @@ ${detail}
     if (data.status === "completed") return "\u5DE5\u4F5C\u6D41\u5DF2\u5168\u90E8\u5B8C\u6210";
     if (data.status === "finishing") return `\u6062\u590D\u5DE5\u4F5C\u6D41: ${data.name}
 \u6B63\u5728\u6536\u5C3E\u9636\u6BB5\uFF0C\u8BF7\u6267\u884C node flow.js finish`;
-    const { data: newData, resetId } = resumeProgress(data);
+    if (data.status === "reconciling") {
+      const doneCount2 = data.tasks.filter((t) => t.status === "done").length;
+      const total2 = data.tasks.length;
+      const reconcile = await loadReconcileState(this.repo.projectRoot());
+      const dirtyState2 = await this.getResumeDirtyState();
+      return [
+        `\u6062\u590D\u5DE5\u4F5C\u6D41: ${data.name}`,
+        `\u8FDB\u5EA6: ${doneCount2}/${total2}`,
+        `\u68C0\u6D4B\u5230\u5F85\u63A5\u7BA1\u7684\u4E2D\u65AD\u4EFB\u52A1: ${reconcile.taskIds.join(", ") || data.current || "\u672A\u77E5"}`,
+        "\u5DF2\u6682\u505C\u7EE7\u7EED\u8C03\u5EA6\uFF1B\u8BF7\u5148\u6267\u884C node flow.js adopt <id> --files ...\uFF0C\u6216\u5728\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E node flow.js restart <id>\u3002\u4E0D\u5F97\u5904\u7406 baseline \u53D8\u66F4\u6216\u672A\u5217\u51FA\u7684\u5176\u4ED6\u9879\u76EE\u4EE3\u7801",
+        ...dirtyState2.lines
+      ].join("\n");
+    }
+    const hadActiveTasks = data.tasks.filter((t) => t.status === "active").map((t) => t.id);
+    const { data: resumedData, resetId } = resumeProgress(data);
     this.locallyActivatedTaskIds.clear();
+    const dirtyState = await this.getResumeDirtyState();
+    const shouldReconcile = hadActiveTasks.length > 0 && dirtyState.baselineFound && dirtyState.residueFiles.length > 0;
+    const newData = shouldReconcile ? { ...resumedData, status: "reconciling", current: hadActiveTasks[0] ?? resumedData.current } : resumedData;
     await this.repo.saveProgress(newData);
-    if (resetId) {
+    if (shouldReconcile) {
+      await saveReconcileState(this.repo.projectRoot(), hadActiveTasks);
+    } else {
+      await clearReconcileState(this.repo.projectRoot());
+    }
+    if (resetId && !shouldReconcile) {
       log.debug(`resume: \u91CD\u7F6E\u4EFB\u52A1 ${resetId}`);
       this.repo.cleanup();
     }
     const doneCount = newData.tasks.filter((t) => t.status === "done").length;
     const total = newData.tasks.length;
-    const dirtySummaryLines = await this.describeResumeDirtyState();
     this.stopHeartbeat?.();
     this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
     const lines = [
       `\u6062\u590D\u5DE5\u4F5C\u6D41: ${newData.name}`,
       `\u8FDB\u5EA6: ${doneCount}/${total}`,
-      resetId ? `\u4E2D\u65AD\u4EFB\u52A1 ${resetId} \u5DF2\u91CD\u7F6E\uFF0C\u5C06\u91CD\u65B0\u6267\u884C` : "\u7EE7\u7EED\u6267\u884C",
-      ...dirtySummaryLines
+      shouldReconcile ? `\u68C0\u6D4B\u5230\u4E2D\u65AD\u4EFB\u52A1 ${hadActiveTasks.join(", ")} \u7684\u5F85\u63A5\u7BA1\u53D8\u66F4\uFF0C\u5DF2\u6682\u505C\u7EE7\u7EED\u8C03\u5EA6\uFF1B\u8BF7\u5148\u6267\u884C node flow.js adopt ${hadActiveTasks[0]} --files ...\uFF0C\u6216\u5728\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E node flow.js restart ${hadActiveTasks[0]}\u3002\u4E0D\u5F97\u5904\u7406 baseline \u53D8\u66F4\u6216\u672A\u5217\u51FA\u7684\u5176\u4ED6\u9879\u76EE\u4EE3\u7801` : resetId ? `\u4E2D\u65AD\u4EFB\u52A1 ${resetId} \u5DF2\u91CD\u7F6E\uFF0C\u5C06\u91CD\u65B0\u6267\u884C` : "\u7EE7\u7EED\u6267\u884C",
+      ...dirtyState.lines
     ];
     return lines.join("\n");
   }
-  /** 生成 resume 的 dirty worktree 提示，区分启动前基线与中断残留 */
-  async describeResumeDirtyState() {
-    const currentDirtyFiles = this.repo.listChangedFiles();
-    const baseline = await loadDirtyBaseline(this.repo.projectRoot());
-    const comparison = compareDirtyFilesAgainstBaseline(currentDirtyFiles, baseline?.files ?? []);
-    if (!baseline) {
-      if (!comparison.currentFiles.length) {
-        return ["\u672A\u627E\u5230 dirty baseline\uFF1B\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u810F\u4E1A\u52A1\u6587\u4EF6\uFF0C\u4F46\u65E0\u6CD5\u8BC1\u660E\u8FD9\u662F\u5E72\u51C0\u91CD\u542F"];
+  async adopt(id, detail, files) {
+    await this.repo.lock();
+    try {
+      const data = await this.requireProgress();
+      if (data.status !== "reconciling") {
+        throw new Error("\u5F53\u524D\u5DE5\u4F5C\u6D41\u4E0D\u5904\u4E8E reconciling \u72B6\u6001\uFF0C\u65E0\u9700 adopt");
       }
-      return [
-        `\u672A\u627E\u5230 dirty baseline\uFF1B\u65E0\u6CD5\u53EF\u9760\u533A\u5206\u542F\u52A8\u524D\u810F\u6587\u4EF6\u4E0E\u4E2D\u65AD\u6B8B\u7559\uFF0C\u4FDD\u5B88\u4FDD\u7559\u5F53\u524D ${comparison.currentFiles.length} \u4E2A\u810F\u6587\u4EF6:`,
-        ...comparison.currentFiles.map((file) => `- ${file}`)
-      ];
+      const reconcile = await loadReconcileState(this.repo.projectRoot());
+      if (!reconcile.taskIds.includes(id)) {
+        throw new Error(`\u4EFB\u52A1 ${id} \u4E0D\u5728\u5F85\u63A5\u7BA1\u5217\u8868\u4E2D`);
+      }
+      const task = data.tasks.find((t) => t.id === id);
+      if (!task) throw new Error(`\u4EFB\u52A1 ${id} \u4E0D\u5B58\u5728`);
+      const remainingTaskIds = reconcile.taskIds.filter((taskId) => taskId !== id);
+      const baseData = {
+        ...data,
+        status: remainingTaskIds.length ? "reconciling" : "running",
+        current: remainingTaskIds[0] ?? null
+      };
+      const message = await this.finalizeSuccessfulTask(baseData, task, detail, files);
+      if (remainingTaskIds.length) {
+        await saveReconcileState(this.repo.projectRoot(), remainingTaskIds);
+        return `${message}
+\u4ECD\u6709 ${remainingTaskIds.length} \u4E2A\u4E2D\u65AD\u4EFB\u52A1\u5F85\u63A5\u7BA1`;
+      }
+      await clearReconcileState(this.repo.projectRoot());
+      return `${message}
+\u4E2D\u65AD\u6B8B\u7559\u5DF2\u63A5\u7BA1\uFF0C\u5DE5\u4F5C\u6D41\u6062\u590D running`;
+    } finally {
+      await this.repo.unlock();
     }
-    if (!comparison.currentFiles.length) {
-      return ["\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u6B8B\u7559\u810F\u4E1A\u52A1\u6587\u4EF6\uFF0C\u672C\u6B21\u6062\u590D\u662F\u5E72\u51C0\u91CD\u542F"];
+  }
+  async restart(id) {
+    await this.repo.lock();
+    try {
+      const data = await this.requireProgress();
+      if (data.status !== "reconciling") {
+        throw new Error("\u5F53\u524D\u5DE5\u4F5C\u6D41\u4E0D\u5904\u4E8E reconciling \u72B6\u6001\uFF0C\u65E0\u9700 restart");
+      }
+      const reconcile = await loadReconcileState(this.repo.projectRoot());
+      if (!reconcile.taskIds.includes(id)) {
+        throw new Error(`\u4EFB\u52A1 ${id} \u4E0D\u5728\u5F85\u63A5\u7BA1\u5217\u8868\u4E2D`);
+      }
+      const dirtyState = await this.getResumeDirtyState();
+      if (dirtyState.residueFiles.length > 0) {
+        throw new Error(`\u8BF7\u5148\u786E\u8BA4\u5E76\u5904\u7406\u5F53\u524D\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E\u518D restart\uFF1A${dirtyState.residueFiles.join(", ")}\u3002\u4E0D\u5F97\u5904\u7406 baseline \u53D8\u66F4\u6216\u672A\u5217\u51FA\u7684\u5176\u4ED6\u9879\u76EE\u4EE3\u7801`);
+      }
+      const remainingTaskIds = reconcile.taskIds.filter((taskId) => taskId !== id);
+      const newData = {
+        ...data,
+        status: remainingTaskIds.length ? "reconciling" : "running",
+        current: null
+      };
+      await this.repo.saveProgress(newData);
+      if (remainingTaskIds.length) {
+        await saveReconcileState(this.repo.projectRoot(), remainingTaskIds);
+        return `\u4EFB\u52A1 ${id} \u5DF2\u786E\u8BA4\u4ECE\u5934\u91CD\u505A\uFF0C\u4ECD\u6709 ${remainingTaskIds.length} \u4E2A\u4E2D\u65AD\u4EFB\u52A1\u5F85\u63A5\u7BA1`;
+      }
+      await clearReconcileState(this.repo.projectRoot());
+      return `\u4EFB\u52A1 ${id} \u5DF2\u786E\u8BA4\u4ECE\u5934\u91CD\u505A\uFF0C\u5DE5\u4F5C\u6D41\u6062\u590D running`;
+    } finally {
+      await this.repo.unlock();
     }
-    const lines = [];
-    if (comparison.preservedBaselineFiles.length) {
-      lines.push(`\u5DE5\u4F5C\u6D41\u542F\u52A8\u524D\u5DF2\u6709 ${comparison.preservedBaselineFiles.length} \u4E2A\u810F\u6587\u4EF6\u4ECD\u7136\u4FDD\u7559:`);
-      lines.push(...comparison.preservedBaselineFiles.map((file) => `- ${file}`));
-    }
-    if (comparison.newDirtyFiles.length) {
-      lines.push(`\u5DF2\u4FDD\u7559 ${comparison.newDirtyFiles.length} \u4E2A\u4E2D\u65AD\u4EFB\u52A1\u6B8B\u7559\u7684\u810F\u4E1A\u52A1\u6587\u4EF6:`);
-      lines.push(...comparison.newDirtyFiles.map((file) => `- ${file}`));
-    }
-    return lines;
   }
   /** 计算 finish 的 workflow-owned 提交边界，必要时拒绝最终提交 */
   async resolveFinishCommitFiles() {
@@ -3961,9 +4118,9 @@ ${detail}
     const explainableOwnedSet = /* @__PURE__ */ new Set([...setupOwnedFiles, ...checkpointOwnedFiles]);
     if (!baseline) {
       const details = comparison.currentFiles.length > 0 ? [
-        `\u672A\u627E\u5230 dirty baseline\uFF1B\u4FDD\u5B88\u8DF3\u8FC7\u6700\u7EC8 auto-commit\uFF0C\u5E76\u4FDD\u7559\u5F53\u524D ${comparison.currentFiles.length} \u4E2A\u810F\u4E1A\u52A1\u6587\u4EF6:`,
+        `\u672A\u627E\u5230 dirty baseline\uFF1B\u4FDD\u5B88\u8DF3\u8FC7\u6700\u7EC8 auto-commit\uFF0C\u5E76\u4FDD\u7559\u5F53\u524D ${comparison.currentFiles.length} \u4E2A\u672A\u5F52\u6863\u53D8\u66F4:`,
         ...comparison.currentFiles.map((file) => `- ${file}`)
-      ] : ["\u672A\u627E\u5230 dirty baseline\uFF1B\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u810F\u4E1A\u52A1\u6587\u4EF6\uFF0C\u4FDD\u5B88\u8DF3\u8FC7\u6700\u7EC8 auto-commit\u3002"];
+      ] : ["\u672A\u627E\u5230 dirty baseline\uFF1B\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u672A\u5F52\u6863\u53D8\u66F4\uFF0C\u4FDD\u5B88\u8DF3\u8FC7\u6700\u7EC8 auto-commit\u3002"];
       return {
         ok: "degraded",
         message: details.join("\n")
@@ -4025,10 +4182,26 @@ ${detail}
       if (!task) throw new Error(`\u4EFB\u52A1 ${id} \u4E0D\u5B58\u5728`);
       if (task.status === "done") return `\u4EFB\u52A1 ${id} \u5DF2\u5B8C\u6210\uFF0C\u65E0\u9700\u8DF3\u8FC7`;
       const warn = task.status === "active" ? "\uFF08\u8B66\u544A: \u8BE5\u4EFB\u52A1\u4E3A active \u72B6\u6001\uFF0C\u5B50Agent\u53EF\u80FD\u4ECD\u5728\u8FD0\u884C\uFF09" : "";
+      const reconcile = data.status === "reconciling" ? await loadReconcileState(this.repo.projectRoot()) : { taskIds: [] };
+      const remainingTaskIds = reconcile.taskIds.filter((taskId) => taskId !== id);
       const newTasks = data.tasks.map(
         (t) => t.id === id ? { ...t, status: "skipped", summary: "\u624B\u52A8\u8DF3\u8FC7" } : t
       );
-      await this.repo.saveProgress({ ...data, current: null, tasks: newTasks });
+      const nextData = {
+        ...data,
+        status: data.status === "reconciling" && remainingTaskIds.length === 0 ? "running" : data.status,
+        current: null,
+        tasks: newTasks
+      };
+      await this.repo.saveProgress(nextData);
+      if (data.status === "reconciling") {
+        if (remainingTaskIds.length) {
+          await saveReconcileState(this.repo.projectRoot(), remainingTaskIds);
+          return `\u5DF2\u8DF3\u8FC7\u4EFB\u52A1 ${id}: ${task.title}${warn}
+\u4ECD\u6709 ${remainingTaskIds.length} \u4E2A\u4E2D\u65AD\u4EFB\u52A1\u5F85\u63A5\u7BA1`;
+        }
+        await clearReconcileState(this.repo.projectRoot());
+      }
       return `\u5DF2\u8DF3\u8FC7\u4EFB\u52A1 ${id}: ${task.title}${warn}`;
     } finally {
       await this.repo.unlock();
@@ -4482,7 +4655,11 @@ function formatTask(task, context) {
   return lines.join("\n");
 }
 function formatBatch(items) {
-  const lines = [`=== \u5E76\u884C\u4EFB\u52A1\u6279\u6B21 (${items.length}\u4E2A) ===`, ""];
+  const lines = [
+    `=== \u5E76\u884C\u4EFB\u52A1\u6279\u6B21 (${items.length}\u4E2A) ===`,
+    "\u5FC5\u987B\u5C06\u672C\u6279\u6B21\u5168\u90E8\u4EFB\u52A1\u5728\u540C\u4E00\u6761\u6D88\u606F\u4E2D\u5E76\u884C\u6D3E\u53D1\u7ED9\u5B50Agent\u3002\u82E5\u6539\u4E3A\u4E32\u884C\u6D3E\u53D1\uFF0C\u4F1A\u76F4\u63A5\u964D\u4F4E\u541E\u5410\u91CF\u5E76\u8FDD\u53CD\u534F\u8BAE\u3002",
+    ""
+  ];
   for (const { task, context } of items) {
     lines.push(formatTask(task, context), "");
   }
@@ -4584,6 +4761,35 @@ var CLI = class {
         }
         return await s.checkpoint(id, detail.trim(), files);
       }
+      case "adopt": {
+        const id = rest[0];
+        if (!id) throw new Error("\u9700\u8981\u4EFB\u52A1ID");
+        const filesIdx = rest.indexOf("--files");
+        const fileIdx = rest.indexOf("--file");
+        let detail;
+        let files;
+        if (filesIdx >= 0) {
+          files = [];
+          for (let i = filesIdx + 1; i < rest.length && !rest[i].startsWith("--"); i++) {
+            files.push(rest[i]);
+          }
+        }
+        if (fileIdx >= 0 && rest[fileIdx + 1]) {
+          const filePath = (0, import_path12.resolve)(rest[fileIdx + 1]);
+          if ((0, import_path12.relative)(process.cwd(), filePath).startsWith("..")) throw new Error("--file \u8DEF\u5F84\u4E0D\u80FD\u8D85\u51FA\u9879\u76EE\u76EE\u5F55");
+          detail = (0, import_fs4.readFileSync)(filePath, "utf-8");
+        } else if (rest.length > 1 && fileIdx < 0 && filesIdx < 0) {
+          detail = rest.slice(1).join(" ");
+        } else {
+          detail = await readStdinIfPiped();
+        }
+        return await s.adopt(id, detail.trim(), files);
+      }
+      case "restart": {
+        const id = rest[0];
+        if (!id) throw new Error("\u9700\u8981\u4EFB\u52A1ID");
+        return await s.restart(id);
+      }
       case "skip": {
         const id = rest[0];
         if (!id) throw new Error("\u9700\u8981\u4EFB\u52A1ID");
@@ -4635,6 +4841,8 @@ var USAGE = `\u7528\u6CD5: node flow.js [--verbose] <command>
   init [--force]       \u521D\u59CB\u5316\u5DE5\u4F5C\u6D41 (stdin\u4F20\u5165\u4EFB\u52A1markdown\uFF0C\u65E0stdin\u5219\u63A5\u7BA1\u9879\u76EE)
   next [--batch]       \u83B7\u53D6\u4E0B\u4E00\u4E2A\u5F85\u6267\u884C\u4EFB\u52A1 (--batch \u8FD4\u56DE\u6240\u6709\u53EF\u5E76\u884C\u4EFB\u52A1)
   checkpoint <id>      \u8BB0\u5F55\u4EFB\u52A1\u5B8C\u6210 [--file <path> | stdin | \u5185\u8054\u6587\u672C] [--files f1 f2 ...]
+  adopt <id>           \u63A5\u7BA1\u4E2D\u65AD\u540E\u5F85\u63A5\u7BA1\u53D8\u66F4\u5E76\u8865 checkpoint [--file <path> | stdin | \u5185\u8054\u6587\u672C] [--files f1 f2 ...]
+  restart <id>         \u5728\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E\u5141\u8BB8\u4EFB\u52A1\u4ECE\u5934\u91CD\u505A
   skip <id>            \u624B\u52A8\u8DF3\u8FC7\u4EFB\u52A1
   review               \u6807\u8BB0code-review\u5DF2\u5B8C\u6210 (finish\u524D\u5FC5\u987B\u6267\u884C)
   finish               \u667A\u80FD\u6536\u5C3E (\u9A8C\u8BC1+\u603B\u7ED3+\u56DE\u5230\u5F85\u547D\uFF0C\u9700\u5148review)

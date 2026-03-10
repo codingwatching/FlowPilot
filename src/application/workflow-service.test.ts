@@ -133,7 +133,7 @@ describe('WorkflowService 集成测试', () => {
     expect(r?.task.id).toBe('001');
   });
 
-  it('resume会明确报告中断任务保留的脏业务文件', async () => {
+  it('resume会明确报告中断任务保留的待接管变更', async () => {
     const repo = new FsWorkflowRepository(dir);
     const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
     changedFilesSpy.mockReturnValueOnce([]);
@@ -145,9 +145,66 @@ describe('WorkflowService 集成测试', () => {
 
     const msg = await svc.resume();
 
-    expect(msg).toContain('中断任务 001 已重置，将重新执行');
-    expect(msg).toContain('已保留 1 个中断任务残留的脏业务文件');
+    expect(msg).toContain('已暂停继续调度');
+    expect(msg).toContain('node flow.js adopt 001');
+    expect(msg).toContain('已保留 1 个中断后待接管变更');
     expect(msg).toContain('src/feature.ts');
+  });
+
+  it('reconciling 状态下 next 会拒绝继续派发任务', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy.mockReturnValueOnce([]);
+    changedFilesSpy.mockReturnValueOnce(['src/feature.ts']);
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.resume();
+
+    await expect(svc.next()).rejects.toThrow(/adopt|restart|skip/);
+  });
+
+  it('adopt 会认领中断任务残留并在最后一个待接管任务后恢复 running', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    vi.spyOn(repo, 'listChangedFiles')
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce(['src/feature.ts']);
+    mockCommitResult(repo, { status: 'committed' });
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.resume();
+
+    const msg = await svc.adopt('001', '[REMEMBER] 接管中断残留', ['src/feature.ts']);
+    expect(msg).toContain('任务 001 完成');
+
+    const data = await svc.status();
+    expect(data?.status).toBe('running');
+    expect(data?.tasks.find(task => task.id === '001')?.status).toBe('done');
+  });
+
+  it('restart 在残留未清理前拒绝重跑，清理后允许重新执行', async () => {
+    const repo = new FsWorkflowRepository(dir);
+    const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
+    changedFilesSpy
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce(['src/feature.ts'])
+      .mockReturnValueOnce(['src/feature.ts'])
+      .mockReturnValueOnce([]);
+    svc = new WorkflowService(repo, parseTasksMarkdown);
+
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.resume();
+
+    await expect(svc.restart('001')).rejects.toThrow(/确认并处理.*本任务变更/);
+    const msg = await svc.restart('001');
+    expect(msg).toContain('任务 001 已确认从头重做');
+
+    const nextTask = await svc.next();
+    expect(nextTask?.task.id).toBe('001');
   });
 
   it('resume会区分启动前已脏且恢复后仍脏的文件', async () => {
@@ -162,9 +219,9 @@ describe('WorkflowService 集成测试', () => {
 
     const msg = await svc.resume();
 
-    expect(msg).toContain('工作流启动前已有 1 个脏文件仍然保留');
+    expect(msg).toContain('工作流启动前已有 1 个未归档变更仍然保留');
     expect(msg).toContain('README.md');
-    expect(msg).not.toContain('中断任务残留的脏业务文件');
+    expect(msg).not.toContain('中断后待接管变更');
   });
 
   it('resume会把无脏文件的恢复表述为干净重启', async () => {
@@ -179,7 +236,7 @@ describe('WorkflowService 集成测试', () => {
 
     const msg = await svc.resume();
 
-    expect(msg).toContain('当前工作区无残留脏业务文件，本次恢复是干净重启');
+    expect(msg).toContain('当前工作区无待接管变更，本次恢复是干净重启');
   });
 
   it('resume在旧工作流缺少baseline时给出保守警告而非误报干净', async () => {
@@ -200,7 +257,7 @@ describe('WorkflowService 集成测试', () => {
     expect(msg).not.toContain('干净重启');
   });
 
-  it('resume会过滤 FlowPilot 运行时脏文件，不把 .claude/settings.json 误报为业务文件', async () => {
+  it('resume会过滤 FlowPilot 运行时变更，不把 .claude/settings.json 误报为项目变更', async () => {
     await initGitRepo(dir);
     const repo = new FsWorkflowRepository(dir);
     svc = new WorkflowService(repo, parseTasksMarkdown);
@@ -219,7 +276,7 @@ describe('WorkflowService 集成测试', () => {
     expect(msg).not.toContain('.flowpilot/');
   });
 
-  it('resume在旧工作流缺少baseline时也会过滤 FlowPilot 运行时脏文件', async () => {
+  it('resume在旧工作流缺少baseline时也会过滤 FlowPilot 运行时变更', async () => {
     await initGitRepo(dir);
     const repo = new FsWorkflowRepository(dir);
     svc = new WorkflowService(repo, parseTasksMarkdown);
@@ -280,6 +337,13 @@ describe('WorkflowService 集成测试', () => {
     await svc.init(md);
     const batch = await svc.nextBatch();
     expect(batch.map(b => b.task.id)).toEqual(['001', '002']);
+  });
+
+  it('next在存在多个可并行任务时拒绝串行派发', async () => {
+    const md = '# 并行测试\n\n1. [backend] A\n2. [frontend] B\n3. [general] C (deps: 1,2)';
+    await svc.init(md);
+
+    await expect(svc.next()).rejects.toThrow(/next --batch|并行|吞吐/);
   });
 
   it('init在setup前记录工作流初始dirty baseline', async () => {
@@ -788,7 +852,7 @@ describe('WorkflowService 集成测试', () => {
     const msg = await svc.finish();
 
     expect(msg).toContain('未找到 dirty baseline');
-    expect(msg).toContain('当前工作区无脏业务文件');
+    expect(msg).toContain('当前工作区无未归档变更');
     expect(msg).toContain('未提交最终commit');
     expect(msg).toContain('工作流回到待命状态');
     expect(commitSpy).not.toHaveBeenCalledWith('finish', expect.any(String), expect.any(String), expect.anything());

@@ -372,6 +372,27 @@ describe('FsWorkflowRepository', () => {
     expect(preToolUse.filter(entry => entry.matcher === 'TaskCreate')).toHaveLength(1);
   });
 
+  it('ensureHooks 忽略畸形的 PreToolUse 项并继续补齐缺失 hooks', async () => {
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
+      model: 'opus',
+      hooks: {
+        PreToolUse: [
+          'broken entry',
+          { matcher: 'TaskCreate' },
+          { matcher: 'OtherTool', hooks: [{ type: 'prompt', prompt: 'keep me' }] },
+        ],
+      },
+    }, null, 2) + '\n', 'utf-8');
+
+    await expect(repo.ensureHooks()).resolves.toBe(true);
+
+    const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
+    const preToolUse = settings.hooks.PreToolUse as Array<{ matcher: string }>;
+    expect(settings.model).toBe('opus');
+    expect(preToolUse.map(entry => entry.matcher)).toEqual(['OtherTool', 'TaskCreate', 'TaskUpdate', 'TaskList']);
+  });
+
   it('ensureHooks records the earliest exact settings baseline and cleanup compares against it', async () => {
     await mkdir(join(dir, '.claude'), { recursive: true });
     const settingsPath = join(dir, '.claude', 'settings.json');

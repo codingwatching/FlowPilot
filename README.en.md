@@ -129,10 +129,12 @@ Parallel:   DB → [User API, Product API] → [User Page, Product Page]  (3 rou
 Close window, lose network, compact, CC crash — bring it on:
 
 ```
-New window → Say: continue task → flow resume → detect interruption → reset unfinished tasks → continue
+New window → Say: continue task → flow resume
+  ├─ no pending task-owned changes: reset unfinished tasks → continue
+  └─ pending task-owned changes detected: pause scheduling → adopt / after handling only the listed task-owned changes restart → continue
 ```
 
-All state persisted in files, independent of conversation history. Even if 3 sub-agents are interrupted simultaneously during parallel execution, all are re-dispatched after recovery.
+All state persisted in files, independent of conversation history. Even if 3 sub-agents are interrupted simultaneously during parallel execution, FlowPilot will not blindly re-dispatch them when pending task-owned changes exist; it pauses and requires reconciliation first.
 
 ### Iterative Review — Run Another Round, Keep Improving
 
@@ -171,7 +173,7 @@ Evolution results directly affect workflow behavior:
 | Parameter | Effect |
 |-----------|--------|
 | `maxRetries` | Determines retry count on checkpoint failure |
-| `parallelLimit` | Limits parallel task count in `nextBatch` |
+| `parallelLimit` | Limits parallel task count in `nextBatch`; when unset FlowPilot does not artificially cap the batch, and `1` effectively forces serial execution |
 | `hints` | Injected into sub-agent context as "evolution suggestions" |
 
 - On success: increase parallelism, optimize parameters
@@ -242,7 +244,7 @@ claude --dangerously-skip-permissions --continue   # Resume most recent conversa
 claude --dangerously-skip-permissions --resume     # Pick from conversation history
 ```
 
-If the worktree is still dirty when resuming, `resume` explicitly tells you which dirty files predate the workflow, which ones were left behind by interrupted tasks, and whether the dirty baseline is missing.
+If the worktree still has unarchived changes when resuming, `resume` explicitly tells you which changes predate the workflow, which ones are pending task-owned changes left by interrupted tasks, and whether the dirty baseline is missing.
 
 ## Architecture Overview
 
@@ -378,7 +380,7 @@ node flow.js init
 
 - **Task failure** — Auto-retry 3 times, still failing after 3 → mark `failed` and skip
 - **Cascade skip** — Downstream tasks depending on failed tasks auto-marked `skipped`
-- **Interruption recovery** — `active` tasks reset to `pending`, redo from scratch; if the worktree is still dirty, `resume` explicitly separates baseline dirt, interrupted-task residue, and missing-baseline warnings
+- **Interruption recovery** — clean interruptions reset `active` tasks back to `pending`; when interrupted task-owned changes exist, the workflow enters `reconciling` and requires `adopt`, or handling only the listed task-owned changes before `restart`, before any next task can be dispatched
 - **Verification failure** — `flow finish` reports error, dispatch sub-agent to fix, retry finish
 - **Final commit refusal** — after verify/review, `flow finish` also checks the dirty baseline, checkpoint-owned files, and cleanup results for `CLAUDE.md` / `.claude/settings.json` / `.gitignore`; any unsafe boundary causes an explicit refusal with the file list
 - **Loop detection** — Three-strategy defense (repeated failures/ping-pong/global circuit breaker), auto-injects warnings into next task

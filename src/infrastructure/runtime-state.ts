@@ -15,6 +15,7 @@ const ACTIVATED_FILE = 'activated.json';
 const DIRTY_BASELINE_FILE = 'dirty-baseline.json';
 const OWNED_FILES_FILE = 'owned-files.json';
 const SETUP_OWNED_FILES_FILE = 'setup-owned.json';
+const RECONCILE_STATE_FILE = 'reconcile-state.json';
 const INJECTIONS_FILE = 'injections.json';
 const RUNTIME_PATH_PREFIXES = ['.flowpilot/', '.workflow/'];
 const RUNTIME_FILES = new Set(['.claude/settings.json']);
@@ -47,6 +48,11 @@ export interface OwnedFilesState {
 /** setup/init 阶段由 FlowPilot 自身改写、可用于边界解释但不可自动提交的文件 */
 export interface SetupOwnedState {
   files: string[];
+}
+
+/** 中断恢复后待接管的任务 */
+export interface ReconcileState {
+  taskIds: string[];
 }
 
 /** FlowPilot 写入 settings.json 的 hook 结构 */
@@ -175,6 +181,10 @@ function isSetupOwnedState(value: unknown): value is SetupOwnedState {
   return isRecord(value) && Array.isArray(value.files);
 }
 
+function isReconcileState(value: unknown): value is ReconcileState {
+  return isRecord(value) && Array.isArray(value.taskIds);
+}
+
 function isHookEntry(value: unknown): value is HookEntry {
   if (!isRecord(value) || typeof value.matcher !== 'string' || !Array.isArray(value.hooks)) {
     return false;
@@ -222,6 +232,17 @@ function isSetupInjectionManifest(value: unknown): value is SetupInjectionManife
 function normalizeSetupOwnedState(state: SetupOwnedState): SetupOwnedState {
   return {
     files: normalizeDirtyFiles(state.files.filter((file): file is string => typeof file === 'string')),
+  };
+}
+
+function normalizeReconcileState(state: ReconcileState): ReconcileState {
+  return {
+    taskIds: [...new Set(
+      state.taskIds
+        .filter((taskId): taskId is string => typeof taskId === 'string')
+        .map(taskId => taskId.trim())
+        .filter(taskId => taskId.length > 0),
+    )],
   };
 }
 
@@ -584,6 +605,36 @@ export async function saveSetupOwnedFiles(basePath: string, files: string[]): Pr
   await writeFile(path + '.tmp', JSON.stringify(next), 'utf-8');
   await rename(path + '.tmp', path);
   return next;
+}
+
+/** 读取中断待接管任务状态，缺失时返回空列表 */
+export async function loadReconcileState(basePath: string): Promise<ReconcileState> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(runtimePath(basePath, RECONCILE_STATE_FILE), 'utf-8'));
+    if (!isReconcileState(parsed)) {
+      return { taskIds: [] };
+    }
+    return normalizeReconcileState(parsed);
+  } catch {
+    return { taskIds: [] };
+  }
+}
+
+/** 持久化中断待接管任务状态 */
+export async function saveReconcileState(basePath: string, taskIds: string[]): Promise<ReconcileState> {
+  const next = normalizeReconcileState({ taskIds });
+  await mkdir(runtimeDir(basePath), { recursive: true });
+  const path = runtimePath(basePath, RECONCILE_STATE_FILE);
+  await writeFile(path + '.tmp', JSON.stringify(next), 'utf-8');
+  await rename(path + '.tmp', path);
+  return next;
+}
+
+/** 清理中断待接管任务状态 */
+export async function clearReconcileState(basePath: string): Promise<void> {
+  try {
+    await unlink(runtimePath(basePath, RECONCILE_STATE_FILE));
+  } catch {}
 }
 
 /** 读取 setup/init 阶段的精确注入 manifest */
