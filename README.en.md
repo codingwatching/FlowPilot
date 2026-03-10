@@ -4,7 +4,7 @@
 
 **One file, one requirement, fully automated development.**
 
-Drop `flow.js` into any project, open Claude Code, describe what you want, then go grab a coffee.
+Drop `flow.js` into any project, open your preferred client (`Claude Code`, `Codex`, `Cursor`, `snow-cli`, etc.), describe what you want, then go grab a coffee.
 When you come back, the code is written, tests have passed, and git commits are done.
 
 > Update: FlowPilot now supports `Claude Code`, `Codex`, `Cursor`, `snow-cli`, and other clients. During `init`, you can directly choose the target client and generate the matching instruction file / setup extras.
@@ -203,13 +203,27 @@ Install plugins first for best results (sub-agent functionality degrades without
 - `code-review` — Finalization code review
 - `context7` — Real-time third-party library documentation lookup
 
-Also enable **Agent Teams** by adding to `~/.claude/settings.json`:
+Client-side parallel / auto-run switches:
 
-```json
-"env": {
-  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-}
-```
+- `Claude Code`
+  - Add to `~/.claude/settings.json`:
+    ```json
+    "env": {
+      "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    }
+    ```
+- `Codex`
+  - Add to `~/.codex/config.toml`:
+    ```toml
+    [features]
+    multi_agent = true
+    ```
+  - For unattended execution, prefer `codex --yolo`
+- `Cursor`
+  - Enable `Agents` in settings
+  - Set `Auto-Run Mode` to `Run Everything`
+- `Other clients`
+  - No single standard exists; self-test multi-agent / auto-run behavior first
 
 In setup mode, `node flow.js init` now shows direct client options:
 - `Claude Code`: generates `AGENTS.md` + `.claude/settings.json`
@@ -464,3 +478,27 @@ Zero runtime external dependencies, only Node.js built-in modules (fs, path, chi
 This project is open-sourced under the [MIT License](LICENSE).
 
 Copyright (c) 2025-2026 FlowPilot Contributors
+
+## Uninstalling FlowPilot
+
+If you no longer want FlowPilot in a project, remove the files it copied in or generated at runtime:
+
+- `flow.js` (the single-file tool you copied into the project)
+- the instruction file:
+  - usually `AGENTS.md` for new projects
+  - possibly `CLAUDE.md` for legacy-compatible setups
+  - `ROLE.md` as well in `snow-cli` mode
+- `.claude/settings.json` (if FlowPilot generated it in `Claude Code` mode)
+- `.workflow/` (local transient runtime state)
+- `.flowpilot/` (local persistent state)
+
+Typical cleanup:
+
+```bash
+rm -rf flow.js AGENTS.md CLAUDE.md ROLE.md .claude/settings.json .workflow .flowpilot
+```
+
+Notes:
+- If you manually added long-term project guidance into `AGENTS.md` / `CLAUDE.md` / `ROLE.md`, keep what you need before deleting them
+- If deleting `settings.json` leaves `.claude/` empty, you can remove the directory too
+- If you only want to disable the workflow but keep the instruction file, you can remove just `flow.js`, `.claude/settings.json`, `.workflow/`, and `.flowpilot/`

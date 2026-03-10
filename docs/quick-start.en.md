@@ -7,8 +7,17 @@
 ## Setup (One Time Only)
 
 1. Make sure Node.js is installed (version 20+)
-2. Enable Agent Teams: add `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }` to `~/.claude/settings.json`
-3. Install plugins: run `/plugin` in CC, install `superpowers`, `frontend-design`, `feature-dev`, `code-review`, `context7`
+2. Enable parallel / auto-run according to your client:
+   - `Claude Code`: add `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }` to `~/.claude/settings.json`
+   - `Codex`: add to `~/.codex/config.toml`
+     ```toml
+     [features]
+     multi_agent = true
+     ```
+     For unattended execution, prefer `codex --yolo`
+   - `Cursor`: enable `Agents` in settings and set `Auto-Run Mode` to `Run Everything`
+   - `Other clients`: self-test multi-agent / auto-run behavior with that client
+3. Install plugins / skills (optional; skipping only degrades capability)
 4. (Optional) Configure environment variables to enable LLM-powered smart extraction and deep analysis:
    Add to the `env` section of `~/.claude/settings.json`:
    ```json
@@ -42,13 +51,16 @@ cd your-project
 node flow.js init
 # Ensures .workflow/, .flowpilot/, .claude/settings.json, and .claude/worktrees/ are added to .gitignore when missing
 
-# 3. Launch Claude Code in fully automated mode, describe your requirements
+# 3. Launch your client and describe your requirements
 claude --dangerously-skip-permissions
+
+# Codex can be started with:
+codex --yolo
 ```
 
 > `--dangerously-skip-permissions` skips all permission prompts for truly unattended operation. Without it, every action requires your confirmation.
 
-Then just tell CC what you want, for example:
+Then just tell the client what you want, for example:
 
 ```
 Build a blog system with user registration/login, article publishing, and comments
@@ -185,3 +197,25 @@ On Windows, use the bundled `.bat` / `.ps1` launchers in each package directory.
 After installation:
 - restart `Codex CLI` for Codex
 - restart `Cursor` for Cursor
+
+## Uninstalling FlowPilot
+
+If you no longer want FlowPilot in a project, remove the files it copied in or generated at runtime:
+
+- `flow.js` (the single-file tool you copied into the project)
+- the instruction file:
+  - usually `AGENTS.md` for new projects
+  - possibly `CLAUDE.md` for legacy-compatible setups
+  - `ROLE.md` as well in `snow-cli` mode
+- `.claude/settings.json` (if FlowPilot generated it in `Claude Code` mode)
+- `.workflow/` (local transient runtime state)
+- `.flowpilot/` (local persistent state)
+
+Typical cleanup:
+
+```bash
+rm -rf flow.js AGENTS.md CLAUDE.md ROLE.md .claude/settings.json .workflow .flowpilot
+```
+
+If this leaves `.claude/` empty, you can remove that directory too.
+If you manually added project guidance into any of those files later, keep what you need before deleting them.

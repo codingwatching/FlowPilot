@@ -4,7 +4,7 @@
 
 **一个文件，一句开发需求，全自动开发。**
 
-把 `flow.js` 丢进任何项目，打开 Claude Code 描述你要做什么，然后去喝杯咖啡。
+把 `flow.js` 丢进任何项目，打开你选择的客户端（`Claude Code` / `Codex` / `Cursor` / `snow-cli` 等）描述你要做什么，然后去喝杯咖啡。
 回来的时候，代码写好了，测试跑完了，git 也提交了。
 
 > 新增说明：现已兼容 `Claude Code`、`Codex`、`Cursor`、`snow-cli` 和其他客户端；`init` 时可直接选择目标客户端并生成对应的 instruction file / 配置。
@@ -224,7 +224,9 @@ Finalization 阶段（可选）：
 
 ## 前置准备
 
-建议先安装插件，否则子Agent功能会降级。在 CC 中执行 `/plugin` 打开插件商店，选择安装：
+建议先安装插件 / 技能，否则多代理和上下文增强能力会降级。
+
+`Claude Code` 可在 CC 中执行 `/plugin` 打开插件商店，选择安装：
 
 - `superpowers` — 需求拆解头脑风暴
 - `frontend-design` — 前端任务
@@ -232,13 +234,27 @@ Finalization 阶段（可选）：
 - `code-review` — 收尾代码审查
 - `context7` — 实时查阅第三方库文档
 
-另外确保开启 **Agent Teams**，在 `~/.claude/settings.json` 中添加：
+不同客户端的并行 / 自动运行开关：
 
-```json
-"env": {
-  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-}
-```
+- `Claude Code`
+  - 在 `~/.claude/settings.json` 中添加：
+    ```json
+    "env": {
+      "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    }
+    ```
+- `Codex`
+  - 在 `~/.codex/config.toml` 中加入：
+    ```toml
+    [features]
+    multi_agent = true
+    ```
+  - 全自动运行建议使用：`codex --yolo`
+- `Cursor`
+  - 在设置的 `Agents` 中开启 `Agents`
+  - 将 `Auto-Run Mode` 调成 `Run Everything`
+- `其他客户端`
+  - 没有统一标准，请先按各自文档自测多代理 / 自动运行能力
 
 `node flow.js init` 在接管模式下会直接显示客户端选项：
 - `Claude Code`：生成 `AGENTS.md` + `.claude/settings.json`
@@ -501,3 +517,27 @@ Copyright (c) 2025-2026 FlowPilot Contributors
 - 群号：`760311090`
 
 ![FlowPilot QQ 群二维码](docs/qq.png)
+
+## 卸载 FlowPilot
+
+如果你之后不想继续在某个项目里使用 FlowPilot，只需要删除它带入或运行时生成的文件：
+
+- `flow.js`（你复制进项目的单文件工具）
+- instruction file：
+  - 新项目通常是 `AGENTS.md`
+  - 兼容旧项目时可能是 `CLAUDE.md`
+  - `snow-cli` 模式下还可能有 `ROLE.md`
+- `.claude/settings.json`（如果是 FlowPilot 在 `Claude Code` 模式下生成的）
+- `.workflow/`（本地临时运行态）
+- `.flowpilot/`（本地持久状态）
+
+常见做法：
+
+```bash
+rm -rf flow.js AGENTS.md CLAUDE.md ROLE.md .claude/settings.json .workflow .flowpilot
+```
+
+注意：
+- 如果 `AGENTS.md` / `CLAUDE.md` / `ROLE.md` 里已经被你手动加入了项目自己的长期说明，请先保留需要的内容
+- 如果 `.claude/` 目录因为删掉 `settings.json` 变成空目录，也可以一起删除
+- 如果你只想停用工作流而保留 instruction file，也可以只删 `flow.js`、`.claude/settings.json`、`.workflow/`、`.flowpilot/`

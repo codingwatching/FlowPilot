@@ -10,13 +10,20 @@ Copy one file into your project, describe one requirement, and it will automatic
 ## Prerequisites
 
 - Node.js >= 20
-- Claude Code (CC) installed
-- **Agent Teams must be enabled**:
-  - Add `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }` to `~/.claude/settings.json`
-  - This is a core dependency — sub-agent task dispatch won't work without it
-- **Plugins recommended** (sub-agent functionality degrades without them):
-  Run `/plugin` in CC to open the plugin store and install:
-  `superpowers`, `frontend-design`, `feature-dev`, `code-review`, `context7`
+- One supported client installed: `Claude Code`, `Codex`, `Cursor`, `snow-cli`, or another client that can follow the generated instruction file
+- Enable parallel / auto-run according to the client:
+  - `Claude Code`: add `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }` to `~/.claude/settings.json`
+  - `Codex`: add to `~/.codex/config.toml`
+    ```toml
+    [features]
+    multi_agent = true
+    ```
+    For unattended execution, prefer `codex --yolo`
+  - `Cursor`: enable `Agents` in settings and set `Auto-Run Mode` to `Run Everything`
+  - `Other clients`: self-test multi-agent / auto-run behavior first
+- **Plugins / skills recommended** (skipping only degrades capability):
+  - Claude Code can install `superpowers`, `frontend-design`, `feature-dev`, `code-review`, `context7` via `/plugin`
+  - Codex / Cursor can use the one-click installer package documented at the end
 
 ## Quick Start
 
@@ -417,6 +424,30 @@ After installation:
 - restart `Codex CLI` for Codex
 - restart `Cursor` for Cursor
 - if you only want the main FlowPilot workflow, you can skip this step entirely
+
+## Uninstalling FlowPilot
+
+If you no longer want FlowPilot in a project, remove the files it copied in or generated at runtime:
+
+- `flow.js` (the single-file tool you copied into the project)
+- the instruction file:
+  - usually `AGENTS.md` for new projects
+  - possibly `CLAUDE.md` for legacy-compatible setups
+  - `ROLE.md` as well in `snow-cli` mode
+- `.claude/settings.json` (if FlowPilot generated it in `Claude Code` mode)
+- `.workflow/` (local transient runtime state)
+- `.flowpilot/` (local persistent state)
+
+Typical cleanup:
+
+```bash
+rm -rf flow.js AGENTS.md CLAUDE.md ROLE.md .claude/settings.json .workflow .flowpilot
+```
+
+Notes:
+- If you manually added long-term project guidance into `AGENTS.md` / `CLAUDE.md` / `ROLE.md`, keep what you need before deleting them
+- If deleting `settings.json` leaves `.claude/` empty, you can remove the directory too
+- If you only want to disable the workflow but keep the instruction file, you can remove just `flow.js`, `.claude/settings.json`, `.workflow/`, and `.flowpilot/`
 
 ## Long-Term Memory System
 

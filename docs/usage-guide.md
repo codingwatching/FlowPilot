@@ -38,13 +38,20 @@ claude --dangerously-skip-permissions --continue
 ## 前置条件
 
 - Node.js >= 20
-- Claude Code (CC) 已安装
-- **必须开启 Agent Teams 功能**：
-  - 在 `~/.claude/settings.json` 中添加 `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }`
-  - 这是核心依赖，未开启则无法派发子Agent执行任务
-- **建议先安装插件**（未安装则子Agent功能降级）：
-  在 CC 中执行 `/plugin` 打开插件商店，选择安装：
-  `superpowers`、`frontend-design`、`feature-dev`、`code-review`、`context7`
+- 已安装一个受支持的客户端：`Claude Code`、`Codex`、`Cursor`、`snow-cli` 或其他可运行 instruction file 的客户端
+- 按客户端开启并行 / 自动运行：
+  - `Claude Code`：在 `~/.claude/settings.json` 中添加 `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }`
+  - `Codex`：在 `~/.codex/config.toml` 中加入
+    ```toml
+    [features]
+    multi_agent = true
+    ```
+    建议全自动运行时使用：`codex --yolo`
+  - `Cursor`：在设置的 `Agents` 中开启 `Agents`，并将 `Auto-Run Mode` 调成 `Run Everything`
+  - `其他客户端`：请先自测多代理 / 自动运行能力
+- **建议先安装插件 / 技能**（未安装则功能降级）：
+  - Claude Code 可通过 `/plugin` 安装 `superpowers`、`frontend-design`、`feature-dev`、`code-review`、`context7`
+  - Codex / Cursor 可用文末的一键安装包
 
 ## 详细初始化步骤
 
@@ -599,3 +606,27 @@ Windows 直接运行对应目录里的 `.bat` / `.ps1` 脚本即可。
 - `Codex`：重启 `Codex CLI`
 - `Cursor`：重启 `Cursor`
 - 如果只想先用 FlowPilot 主流程，可以完全跳过这一步
+
+## 卸载 FlowPilot
+
+如果你之后不想继续在某个项目里使用 FlowPilot，只需要删除它带入或运行时生成的文件：
+
+- `flow.js`（你复制进项目的单文件工具）
+- instruction file：
+  - 新项目通常是 `AGENTS.md`
+  - 兼容旧项目时可能是 `CLAUDE.md`
+  - `snow-cli` 模式下还可能有 `ROLE.md`
+- `.claude/settings.json`（如果是 FlowPilot 在 `Claude Code` 模式下生成的）
+- `.workflow/`（本地临时运行态）
+- `.flowpilot/`（本地持久状态）
+
+常见做法：
+
+```bash
+rm -rf flow.js AGENTS.md CLAUDE.md ROLE.md .claude/settings.json .workflow .flowpilot
+```
+
+注意：
+- 如果 `AGENTS.md` / `CLAUDE.md` / `ROLE.md` 里已经被你手动加入了项目自己的长期说明，请先保留需要的内容
+- 如果 `.claude/` 目录因为删掉 `settings.json` 变成空目录，也可以一起删除
+- 如果你只想停用工作流而保留 instruction file，也可以只删 `flow.js`、`.claude/settings.json`、`.workflow/`、`.flowpilot/`

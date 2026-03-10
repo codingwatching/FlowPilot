@@ -7,8 +7,17 @@
 ## 准备工作（只做一次）
 
 1. 确保电脑装了 Node.js（版本 20 以上）
-2. 开启 Agent Teams：在 `~/.claude/settings.json` 中添加 `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }`
-3. 安装插件：在 CC 中执行 `/plugin`，选择安装 `superpowers`、`frontend-design`、`feature-dev`、`code-review`、`context7`
+2. 按客户端开启并行 / 自动运行：
+   - `Claude Code`：在 `~/.claude/settings.json` 中添加 `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }`
+   - `Codex`：在 `~/.codex/config.toml` 中加入：
+     ```toml
+     [features]
+     multi_agent = true
+     ```
+     全自动运行建议使用：`codex --yolo`
+   - `Cursor`：在设置的 `Agents` 中开启 `Agents`，并把 `Auto-Run Mode` 调成 `Run Everything`
+   - `其他客户端`：先按各自文档自测多代理 / 自动运行能力
+3. 安装插件 / 技能（可选，不安装也只是功能降级）
 4. （可选）配置环境变量，启用 LLM 智能提取和深度分析：
    在 `~/.claude/settings.json` 的 `env` 中添加：
    ```json
@@ -42,13 +51,16 @@ cd 你的项目
 node flow.js init
 # 会确保 .workflow/、.flowpilot/、.claude/settings.json、.claude/worktrees/ 被写入 .gitignore（若缺失）
 
-# 3. 用全自动模式启动 Claude Code，直接描述需求
+# 3. 启动你的客户端，直接描述需求
 claude --dangerously-skip-permissions
+
+# Codex 可直接用：
+codex --yolo
 ```
 
 > `--dangerously-skip-permissions` 会跳过所有权限确认弹窗，实现真正的全自动。不加的话每个操作都要你点确认。
 
-然后直接告诉 CC 你要做什么，比如：
+然后直接告诉客户端你要做什么，比如：
 
 ```
 帮我做一个博客系统，要有用户注册登录、文章发布、评论功能
@@ -185,3 +197,25 @@ Windows 可直接使用目录中的 `.bat` / `.ps1` 脚本。
 安装完成后：
 - `Codex` 需要重启 `Codex CLI`
 - `Cursor` 需要重启 `Cursor`
+
+## 卸载 FlowPilot
+
+如果你之后不想继续在项目里使用 FlowPilot，只需要删除它带入或运行时生成的文件：
+
+- `flow.js`（你复制进项目的单文件工具）
+- instruction file：
+  - 新项目通常是 `AGENTS.md`
+  - 兼容旧项目时可能是 `CLAUDE.md`
+  - `snow-cli` 模式下还可能有 `ROLE.md`
+- `.claude/settings.json`（如果是 FlowPilot 在 `Claude Code` 模式下生成的）
+- `.workflow/`（本地临时运行态）
+- `.flowpilot/`（本地持久状态）
+
+常见做法：
+
+```bash
+rm -rf flow.js AGENTS.md CLAUDE.md ROLE.md .claude/settings.json .workflow .flowpilot
+```
+
+如果 `.claude/` 目录因此变成空目录，也可以一起删除。
+如果这些文件里后来有你手动补充的项目说明，请先保留需要的内容再删除。
