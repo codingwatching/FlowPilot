@@ -34,7 +34,11 @@ node flow.js init
 ```
 
 This auto-generates:
-- `CLAUDE.md` — Embedded dispatch protocol (`<!-- flowpilot:start/end -->` markers)
+- It first shows client options, then generates according to the selected client:
+  - `AGENTS.md` — default instruction file for new projects
+  - `CLAUDE.md` — reused only for legacy projects that already have it
+  - `ROLE.md` — additionally generated only for `snow-cli`, with the same content as `AGENTS.md`
+  - `.claude/settings.json` — generated only for `Claude Code`
 - `.workflow/` directory — local transient runtime state
 - local-state `.gitignore` rules when missing — by default `.workflow/`, `.flowpilot/`, `.claude/settings.json`, and `.claude/worktrees/`
 
@@ -75,13 +79,14 @@ Computer shut down, CC crashed, context full — no problem:
 ```
 # Open a new CC window
 You: Continue task
-CC: Resuming workflow: Blog System | Progress: 7/12 | Interrupted task 008 reset and will be re-run
+CC: Resuming workflow: Blog System | Progress: 7/12 | Pending task-owned changes detected for interrupted task 008; scheduling paused
 ```
 
-If the worktree is still dirty, `resume` also reports the real boundary state instead of using a generic success message:
-- baseline dirty files that existed before the workflow and are still present
-- newly dirty business files left behind by interrupted tasks and intentionally preserved
+If the worktree still has unarchived changes, `resume` also reports the real boundary state instead of using a generic success message:
+- baseline unarchived changes that existed before the workflow and are still present
+- pending task-owned changes left behind by interrupted tasks and intentionally preserved
 - a conservative warning when the dirty baseline is missing and FlowPilot can no longer prove this is a clean restart
+- when pending task-owned changes exist, the workflow enters `reconciling` and requires `adopt` or restart after handling only the listed task-owned changes
 
 ## Command Reference
 
@@ -91,10 +96,12 @@ If the worktree is still dirty, `resume` also reports the real boundary state in
 | `node flow.js init --force` | Force re-initialize (overwrite existing workflow) |
 | `node flow.js status` | View current progress |
 | `node flow.js next` | Get next task (with dependency context) |
-| `node flow.js next --batch` | Get all parallelizable tasks |
+| `node flow.js next --batch` | Get all dependency-parallel tasks suitable for batch dispatch |
 | `node flow.js checkpoint <id>` | Mark task complete (stdin/--file/inline) [--files f1 f2 ...] |
+| `node flow.js adopt <id>` | Adopt pending task-owned changes and record a checkpoint |
+| `node flow.js restart <id>` | Allow a task to restart after the listed task-owned changes are handled |
 | `node flow.js skip <id>` | Skip a task |
-| `node flow.js resume` | Interruption recovery (reset active→pending) |
+| `node flow.js resume` | Interruption recovery (enters reconciling when needed) |
 | `node flow.js review` | Mark code-review as done (required before finish) |
 | `node flow.js finish` | Smart finalization (verify+report passed/skipped steps+refuse unsafe final commits, requires review) |
 | `node flow.js add <desc> [--type T]` | Add new task (argument order flexible) |
@@ -132,7 +139,8 @@ Format rules:
 ```
 your-project/
 ├── flow.js                    # The tool itself (copied by you)
-├── CLAUDE.md                  # CC config (embedded dispatch protocol)
+├── AGENTS.md                  # Default instruction file for new projects
+├── ROLE.md                    # Extra file for snow-cli only
 └── .workflow/
     ├── progress.md            # Task status table (core memory)
     ├── tasks.md               # Original task definitions
@@ -148,11 +156,11 @@ your-project/
 ```
 User describes development requirements
     ↓
-CC reads CLAUDE.md → Finds embedded protocol → Enters dispatch mode
+The client reads the instruction file (AGENTS.md by default, CLAUDE.md for legacy repos) → Finds embedded protocol → Enters dispatch mode
     ↓
 flow resume → Check for unfinished workflow
     ↓
-flow next --batch → Return all parallelizable tasks + dependency context
+flow next --batch → Return all dependency-parallel tasks + dependency context
     ↓
 CC dispatches sub-agents in parallel via Task tool (Agent Teams)
     ↓
@@ -189,7 +197,7 @@ Main Agent (dispatcher)
 ```
 
 Key points:
-- Main agent uses `flow next --batch` to get all parallelizable tasks at once
+- Main agent prefers `flow next --batch` to get all dependency-parallel tasks at once; if write boundaries are still unclear, `flow next` can be used temporarily for manual serialization
 - Dispatches in parallel via multiple Task tool calls **in a single message**
 - Each sub-agent **works independently, checkpoints independently, commits independently**
 - Main agent context doesn't bloat from sub-agent output (sub-agents record their own)
@@ -273,16 +281,16 @@ New window → Say: continue task → flow resume
   ↓
 Detect 3 active tasks → Reset all to pending
   ↓
-flow next --batch → Re-dispatch all 3 tasks in parallel
+flow next --batch → Re-dispatch all 3 tasks in parallel (when write boundaries are clear)
 ```
 
 `flow resume` resets **all** active tasks to pending, regardless of count. This means after a parallel interruption, that entire batch is redone. Already checkpointed tasks are unaffected.
 
 At the same time, resume now reports the dirty-worktree state truthfully:
-- `Current worktree has no leftover dirty business files; this resume is a clean restart`
-- `N dirty files from before workflow start are still preserved`
-- `Preserved N dirty business files left behind by interrupted tasks`
-- `Dirty baseline missing; cannot reliably distinguish pre-existing dirt from interrupted-task residue`
+- `Current worktree has no pending task-owned changes; this resume is a clean restart`
+- `N unarchived changes from before workflow start are still preserved`
+- `Preserved N pending task-owned changes left behind by interrupted tasks`
+- `Dirty baseline missing; cannot reliably distinguish pre-existing changes from interrupted-task residue`
 
 These lines are boundary diagnostics, not errors. Their job is to prevent a dirty worktree from being mislabeled as perfectly clean.
 
@@ -357,7 +365,7 @@ Plugins are optional. Without the frontend-design plugin, frontend tasks execute
 **Q: Why did `flow finish` refuse the final commit?**
 The most common causes are:
 1. newly dirty files that were never owned by any checkpoint `--files` declaration
-2. leftover user changes in `CLAUDE.md`, `.claude/settings.json`, or `.gitignore` after cleanup
+2. leftover user changes in the instruction file (`AGENTS.md`, or legacy `CLAUDE.md`), `.claude/settings.json`, or `.gitignore` after cleanup
 3. a missing dirty baseline, so FlowPilot can no longer prove the workflow boundary is safe
 
 When this happens, FlowPilot stays in `finishing` state and lists the suspicious files instead of committing on your behalf.
@@ -365,7 +373,7 @@ When this happens, FlowPilot stays in `finishing` state and lists the suspicious
 **Q: Should .workflow be committed to git?**
 Usually no. `.workflow/` is local transient runtime state, `flow finish` removes it on successful completion, and the default `.gitignore` policy ignores it.
 
-**Q: How are `CLAUDE.md`, `.claude/settings.json`, and `.gitignore` cleaned up?**
+**Q: How are `AGENTS.md` / `CLAUDE.md`, `.claude/settings.json`, and `.gitignore` cleaned up?**
 They follow ownership-based symmetric cleanup:
 - if FlowPilot created them during setup/init and the contents still exactly match the injected content, finish deletes them or restores them precisely
 - if they already existed, finish removes only the FlowPilot-owned injected portion and keeps your original content
@@ -374,6 +382,41 @@ They follow ownership-based symmetric cleanup:
 
 **Q: Will summaries get too long with many tasks?**
 No. After 10+ completed tasks, summaries auto-compress by type, keeping only the 3 most recent task names per group.
+
+## Optional: One-Click Skill Installation for Codex / Cursor
+
+> This is an optional enhancement. FlowPilot itself works without these installers; skipping them only degrades some Skills / MCP capabilities.
+
+The repository includes bundled installers compatible with both `Codex CLI` and `Cursor`:
+
+- Root folder: [`兼容codex@cursor一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能)
+- Codex package: [`兼容codex@cursor一键安装技能/codex一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能/codex一键安装技能)
+- Cursor package: [`兼容codex@cursor一键安装技能/cursor一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能/cursor一键安装技能)
+
+How to choose:
+- For `Codex CLI` skills / MCP, use `codex一键安装技能/`
+- For `Cursor` skills / MCP, use `cursor一键安装技能/`
+
+Common entry points:
+
+```bash
+# Codex (macOS / Linux)
+cd "兼容codex@cursor一键安装技能/codex一键安装技能"
+chmod +x install.sh repair.sh
+./install.sh --force
+
+# Cursor (macOS / Linux)
+cd "兼容codex@cursor一键安装技能/cursor一键安装技能"
+chmod +x install_cursor_skills.sh repair_cursor_skills.sh self_check_cursor_skills.sh
+./install_cursor_skills.sh
+```
+
+On Windows, use the bundled `.bat` / `.ps1` launchers in each package directory.
+
+After installation:
+- restart `Codex CLI` for Codex
+- restart `Cursor` for Cursor
+- if you only want the main FlowPilot workflow, you can skip this step entirely
 
 ## Long-Term Memory System
 

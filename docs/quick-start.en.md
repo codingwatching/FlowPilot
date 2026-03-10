@@ -86,9 +86,10 @@ claude --dangerously-skip-permissions --continue
 
 Once inside, say "continue task" and it will automatically resume from the breakpoint. Nothing is lost.
 
-If the worktree is still dirty, `resume` now tells the truth about what survived:
-- baseline dirty files that already existed before the workflow started and are still present
-- newly dirty business files left behind by interrupted tasks and intentionally preserved
+If the worktree still has unarchived changes, `resume` now tells the truth about what survived:
+- baseline unarchived changes that already existed before the workflow started and are still present
+- pending task-owned changes left behind by interrupted tasks
+- if pending task-owned changes exist, the workflow enters `reconciling` and requires `adopt` or restart after handling only the listed task-owned changes
 - when the dirty baseline is missing, an explicit warning that FlowPilot cannot prove this is a clean restart
 
 To pick from conversation history:
@@ -139,7 +140,7 @@ Or just ask CC: "How's the progress?"
 
 Finish will explicitly refuse the final commit instead of guessing when it sees:
 - newly dirty files that were never owned by a workflow checkpoint
-- leftover user changes in `CLAUDE.md`, `.claude/settings.json`, or `.gitignore` after cleanup runs
+- leftover user changes in the instruction file (`AGENTS.md`, or legacy `CLAUDE.md`), `.claude/settings.json`, or `.gitignore` after cleanup runs
 - a missing dirty baseline, so FlowPilot can no longer prove which dirty files predated the workflow
 
 In short: FlowPilot only final-commits business files that this workflow explicitly owned. Everything else must be resolved first.
@@ -150,3 +151,37 @@ Normal usage only requires remembering three things:
 1. Put a `flow.js` in the project, run `node flow.js init`
 2. Open CC, describe your development requirements
 3. If interrupted, open a new window and say "continue task"
+
+## Optional: One-Click Skill Installation (Codex / Cursor)
+
+> FlowPilot works without these installers. Skipping them only means some skill-driven capabilities may degrade.
+
+The repository includes bundled installers compatible with both `Codex` and `Cursor`:
+
+- Root folder: [`兼容codex@cursor一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能)
+- Codex package: [`兼容codex@cursor一键安装技能/codex一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能/codex一键安装技能)
+- Cursor package: [`兼容codex@cursor一键安装技能/cursor一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能/cursor一键安装技能)
+
+How to choose:
+- If you want skills/MCP for `Codex CLI`, use `codex一键安装技能/`
+- If you want skills/MCP for `Cursor`, use `cursor一键安装技能/`
+
+Common entry points:
+
+```bash
+# Codex (macOS / Linux)
+cd "兼容codex@cursor一键安装技能/codex一键安装技能"
+chmod +x install.sh repair.sh
+./install.sh --force
+
+# Cursor (macOS / Linux)
+cd "兼容codex@cursor一键安装技能/cursor一键安装技能"
+chmod +x install_cursor_skills.sh repair_cursor_skills.sh self_check_cursor_skills.sh
+./install_cursor_skills.sh
+```
+
+On Windows, use the bundled `.bat` / `.ps1` launchers in each package directory.
+
+After installation:
+- restart `Codex CLI` for Codex
+- restart `Cursor` for Cursor

@@ -86,10 +86,11 @@ claude --dangerously-skip-permissions --continue
 
 进去后说「继续任务」，它会自动从断点继续，之前做的不会丢。
 
-如果工作区里仍有脏业务文件，`resume` 现在会如实说明它们属于哪一类：
-- 工作流启动前就已经存在、恢复后仍保留的 baseline 脏文件
-- 中断任务留下、被保守保留的新增脏文件
-- 如果缺少 dirty baseline，则会明确提示“无法证明这是干净重启”，而不会误报一切干净
+如果工作区里仍有未归档变更，`resume` 现在会如实说明它们属于哪一类：
+- 工作流启动前就已经存在、恢复后仍保留的 baseline 未归档变更
+- 中断后待接管的新变更
+- 如果存在待接管变更，工作流会进入 `reconciling`，必须先 `adopt` 或在确认并处理列出的本任务变更后 `restart`
+- 如果缺少 dirty baseline，则会明确提示“无法证明这是干净重启”
 
 如果想从历史对话列表里挑一个恢复：
 ```bash
@@ -139,7 +140,7 @@ node flow.js status
 
 如果 finish 发现以下情况，会明确拒绝最终提交，而不是帮你“赌一把”：
 - 存在不属于本轮 workflow checkpoint 的新增脏文件
-- `CLAUDE.md`、`.claude/settings.json`、`.gitignore` 在 cleanup 之后仍残留用户改动
+- instruction file（`AGENTS.md` / 兼容旧 `CLAUDE.md`）、`.claude/settings.json`、`.gitignore` 在 cleanup 之后仍残留用户改动
 - 缺少 dirty baseline，无法证明哪些脏文件是工作流之外的历史遗留
 
 一句话理解：FlowPilot 只会最终提交“本轮任务明确声明归属的业务文件”，其余脏文件一律先停下来让你处理。
@@ -150,3 +151,37 @@ node flow.js status
 1. 项目里放一个 `flow.js`，执行 `node flow.js init`
 2. 打开 CC，描述开发需求
 3. 中断了就新开窗口说「继续任务」
+
+## 可选：一键安装技能（Codex / Cursor）
+
+> 不安装也可以正常使用，只是部分技能驱动能力会降级。
+
+FlowPilot 仓库内置了兼容 `Codex` / `Cursor` 的一键安装包：
+
+- 总目录：[`兼容codex@cursor一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能)
+- Codex 包：[`兼容codex@cursor一键安装技能/codex一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能/codex一键安装技能)
+- Cursor 包：[`兼容codex@cursor一键安装技能/cursor一键安装技能/`](/work2026/tools/FlowPilot/兼容codex@cursor一键安装技能/cursor一键安装技能)
+
+如何选择：
+- 你要给 `Codex CLI` 安装技能和 MCP：用 `codex一键安装技能/`
+- 你要给 `Cursor` 安装技能和 MCP：用 `cursor一键安装技能/`
+
+常用入口：
+
+```bash
+# Codex（macOS / Linux）
+cd "兼容codex@cursor一键安装技能/codex一键安装技能"
+chmod +x install.sh repair.sh
+./install.sh --force
+
+# Cursor（macOS / Linux）
+cd "兼容codex@cursor一键安装技能/cursor一键安装技能"
+chmod +x install_cursor_skills.sh repair_cursor_skills.sh self_check_cursor_skills.sh
+./install_cursor_skills.sh
+```
+
+Windows 可直接使用目录中的 `.bat` / `.ps1` 脚本。
+
+安装完成后：
+- `Codex` 需要重启 `Codex CLI`
+- `Cursor` 需要重启 `Cursor`

@@ -7,6 +7,8 @@
 Drop `flow.js` into any project, open Claude Code, describe what you want, then go grab a coffee.
 When you come back, the code is written, tests have passed, and git commits are done.
 
+> Update: FlowPilot now supports `Claude Code`, `Codex`, `Cursor`, `snow-cli`, and other clients. During `init`, you can directly choose the target client and generate the matching instruction file / setup extras.
+
 ## Recent Updates
 
 **OpenSpec Integration** — Task parser supports OpenSpec checkbox format, dual-path protocol auto-selects standard/OpenSpec planning flow, supports `tasks.md` auto-discovery with user confirmation
@@ -361,7 +363,7 @@ Companion npm scripts:
 ```
 node flow.js init
        ↓
-  Protocol embedded in the instruction file (AGENTS.md by default for new projects, CLAUDE.md for legacy repos) + Hooks injected
+  Protocol embedded in the instruction file (AGENTS.md by default for new projects, CLAUDE.md for legacy repos) + client-specific setup extras when selected
        ↓
   User describes requirements / provides dev docs
        ↓                          ← Everything below is fully automated, no human intervention
