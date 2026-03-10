@@ -424,7 +424,7 @@ echo '\u6458\u8981 [REMEMBER] \u5173\u952E\u53D1\u73B0 [DECISION] \u6280\u672F\u
    - Read \`.flowpilot/evolution/\` files to see past experiments
    - Analyze: what went well, what could improve, config optimization opportunities
    - Pipe structured findings into: \`echo '[CONFIG] \u5C06 maxRetries \u63D0\u5347\u81F3 5\\n[PROTOCOL] \u5B50Agent\u5E94\u5148\u9A8C\u8BC1\u73AF\u5883\u518D\u7F16\u7801' | node flow.js evolve\`
-   - Tags: \`[CONFIG]\` for config changes, \`[PROTOCOL]\` for CLAUDE.md protocol changes
+   - Tags: \`[CONFIG]\` for config changes, \`[PROTOCOL]\` for instruction-file protocol changes
 5. Run \`node flow.js finish\` again \u2014 verify passes + review done \u2192 final commit \u2192 idle.
 **Loop: finish(verify) \u2192 review(code-review) \u2192 evolve(AI\u53CD\u601D) \u2192 fix \u2192 finish again. All gates must pass.**
 
@@ -494,7 +494,7 @@ function isExactFileSnapshot(value) {
   return isRecord(value) && typeof value.exists === "boolean" && (value.rawContent === void 0 || typeof value.rawContent === "string");
 }
 function isClaudeMdInjectionState(value) {
-  return isRecord(value) && typeof value.created === "boolean" && typeof value.block === "string" && (value.scaffold === void 0 || typeof value.scaffold === "string");
+  return isRecord(value) && typeof value.created === "boolean" && typeof value.block === "string" && (value.path === void 0 || typeof value.path === "string") && (value.scaffold === void 0 || typeof value.scaffold === "string");
 }
 function isHooksInjectionState(value) {
   return isRecord(value) && typeof value.created === "boolean" && Array.isArray(value.preToolUse) && value.preToolUse.every(isHookEntry) && (value.settingsBaseline === void 0 || isExactFileSnapshot(value.settingsBaseline));
@@ -540,6 +540,7 @@ function normalizeSetupInjectionManifest(manifest) {
     normalized.claudeMd = {
       created: manifest.claudeMd.created,
       block: manifest.claudeMd.block,
+      ...manifest.claudeMd.path !== void 0 ? { path: manifest.claudeMd.path } : {},
       ...manifest.claudeMd.scaffold !== void 0 ? { scaffold: manifest.claudeMd.scaffold } : {}
     };
   }
@@ -853,6 +854,8 @@ function defaultInvalidLockStaleAfterMs() {
 var PERSISTENT_DIR = ".flowpilot";
 var LEGACY_RUNTIME_DIR = ".workflow";
 var CONFIG_FILE = "config.json";
+var PRIMARY_INSTRUCTION_FILE = "AGENTS.md";
+var LEGACY_INSTRUCTION_FILE = "CLAUDE.md";
 var VALID_WORKFLOW_STATUS = /* @__PURE__ */ new Set(["idle", "running", "reconciling", "finishing", "completed", "aborted"]);
 var VALID_TASK_STATUS = /* @__PURE__ */ new Set(["pending", "active", "done", "skipped", "failed"]);
 function parseProgressMarkdown(raw) {
@@ -960,6 +963,21 @@ function cleanupClaudeContent(content, manifest) {
     return { effect: "delete" };
   }
   return normalized === content ? { effect: "noop" } : { effect: "write", content: normalized };
+}
+async function resolveInstructionFile(basePath2) {
+  const primaryPath = (0, import_path2.join)(basePath2, PRIMARY_INSTRUCTION_FILE);
+  try {
+    await (0, import_promises2.access)(primaryPath);
+    return { absPath: primaryPath, relPath: PRIMARY_INSTRUCTION_FILE };
+  } catch {
+  }
+  const legacyPath = (0, import_path2.join)(basePath2, LEGACY_INSTRUCTION_FILE);
+  try {
+    await (0, import_promises2.access)(legacyPath);
+    return { absPath: legacyPath, relPath: LEGACY_INSTRUCTION_FILE };
+  } catch {
+  }
+  return { absPath: primaryPath, relPath: PRIMARY_INSTRUCTION_FILE };
 }
 function cleanupHookSettings(settings, manifest) {
   const hooksManifest = manifest.hooks;
@@ -1253,8 +1271,7 @@ var FsWorkflowRepository = class {
     }
   }
   async ensureClaudeMd() {
-    const base = (0, import_path2.join)(this.root, "..");
-    const path = (0, import_path2.join)(base, "CLAUDE.md");
+    const { absPath: path, relPath } = await resolveInstructionFile(this.base);
     const marker = "<!-- flowpilot:start -->";
     const block = (await loadProtocolTemplate(this.base)).trim();
     let created = false;
@@ -1273,6 +1290,7 @@ var FsWorkflowRepository = class {
       claudeMd: {
         created,
         block,
+        path: relPath,
         ...created ? { scaffold } : {}
       }
     });
@@ -1410,10 +1428,11 @@ var FsWorkflowRepository = class {
     await (0, import_promises2.writeFile)(path + ".tmp", JSON.stringify(config, null, 2) + "\n", "utf-8");
     await (0, import_promises2.rename)(path + ".tmp", path);
   }
-  /** 清理注入的 CLAUDE.md 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
+  /** 清理注入的 instruction file 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
   async cleanupInjections() {
     const manifest = await loadSetupInjectionManifest(this.base);
-    const mdPath = (0, import_path2.join)(this.base, "CLAUDE.md");
+    const mdRelPath = manifest.claudeMd?.path ?? LEGACY_INSTRUCTION_FILE;
+    const mdPath = (0, import_path2.join)(this.base, mdRelPath);
     try {
       const content = await (0, import_promises2.readFile)(mdPath, "utf-8");
       const cleaned = cleanupClaudeContent(content, manifest);
@@ -3621,7 +3640,7 @@ function isExplicitFailureCheckpoint(detail) {
   const normalized = detail.trim();
   return CHECKPOINT_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
-var CANONICAL_SETUP_NON_COMMITTABLE_FILES = ["CLAUDE.md", ".gitignore"];
+var CANONICAL_SETUP_NON_COMMITTABLE_FILES = ["AGENTS.md", "CLAUDE.md", ".gitignore"];
 var WorkflowService = class {
   constructor(repo2, parse) {
     this.repo = repo2;
@@ -3781,7 +3800,9 @@ ${def.description}
     await clearReconcileState(this.repo.projectRoot());
     await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
     const setupOwnedFiles = [];
-    if (await this.repo.ensureClaudeMd()) setupOwnedFiles.push("CLAUDE.md");
+    if (await this.repo.ensureClaudeMd()) {
+      setupOwnedFiles.push((await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? "AGENTS.md");
+    }
     if (await this.repo.ensureHooks()) setupOwnedFiles.push(".claude/settings.json");
     if (await this.repo.ensureLocalStateIgnored()) setupOwnedFiles.push(".gitignore");
     await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
@@ -4200,7 +4221,7 @@ ${warns.join("\n")}` : msg;
       await this.repo.unlock();
     }
   }
-  /** setup: 项目接管模式 - 写入CLAUDE.md */
+  /** setup: 项目接管模式 - 写入 instruction file */
   async setup() {
     const existing = await this.repo.loadProgress();
     const wrote = await this.repo.ensureClaudeMd();
@@ -4221,7 +4242,10 @@ ${warns.join("\n")}` : msg;
       lines.push("\u7B49\u5F85\u9700\u6C42\u8F93\u5165\uFF08\u6587\u6863\u6216\u5BF9\u8BDD\u63CF\u8FF0\uFF09");
     }
     lines.push("");
-    if (wrote) lines.push("CLAUDE.md \u5DF2\u66F4\u65B0: \u6DFB\u52A0\u4E86\u5DE5\u4F5C\u6D41\u534F\u8BAE");
+    if (wrote) {
+      const instructionPath = (await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? "AGENTS.md";
+      lines.push(`${instructionPath} \u5DF2\u66F4\u65B0: \u6DFB\u52A0\u4E86\u5DE5\u4F5C\u6D41\u534F\u8BAE`);
+    }
     lines.push("\u63CF\u8FF0\u4F60\u7684\u5F00\u53D1\u4EFB\u52A1\u5373\u53EF\u542F\u52A8\u5168\u81EA\u52A8\u5F00\u53D1");
     return lines.join("\n");
   }

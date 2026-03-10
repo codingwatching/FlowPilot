@@ -71,6 +71,7 @@ export interface ExactFileSnapshot {
 export interface ClaudeMdInjectionState {
   created: boolean;
   block: string;
+  path?: string;
   scaffold?: string;
 }
 
@@ -203,6 +204,7 @@ function isClaudeMdInjectionState(value: unknown): value is ClaudeMdInjectionSta
   return isRecord(value)
     && typeof value.created === 'boolean'
     && typeof value.block === 'string'
+    && (value.path === undefined || typeof value.path === 'string')
     && (value.scaffold === undefined || typeof value.scaffold === 'string');
 }
 
@@ -274,6 +276,7 @@ function normalizeSetupInjectionManifest(manifest: SetupInjectionManifest): Setu
     normalized.claudeMd = {
       created: manifest.claudeMd.created,
       block: manifest.claudeMd.block,
+      ...(manifest.claudeMd.path !== undefined ? { path: manifest.claudeMd.path } : {}),
       ...(manifest.claudeMd.scaffold !== undefined ? { scaffold: manifest.claudeMd.scaffold } : {}),
     };
   }

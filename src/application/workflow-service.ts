@@ -15,7 +15,7 @@ import { extractAll } from '../infrastructure/extractor';
 import { truncateHeadTail, computeMaxChars } from '../infrastructure/truncation';
 import { detect as detectLoop, type LoopDetection } from '../infrastructure/loop-detector';
 import { startHeartbeat, runHeartbeat } from '../infrastructure/heartbeat';
-import { clearReconcileState, collectOwnedFiles, compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, loadOwnedFiles, loadReconcileState, loadSetupOwnedFiles, recordOwnedFiles, recordTaskActivations, saveDirtyBaseline, saveReconcileState, saveSetupOwnedFiles } from '../infrastructure/runtime-state';
+import { clearReconcileState, collectOwnedFiles, compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, loadOwnedFiles, loadReconcileState, loadSetupInjectionManifest, loadSetupOwnedFiles, recordOwnedFiles, recordTaskActivations, saveDirtyBaseline, saveReconcileState, saveSetupOwnedFiles } from '../infrastructure/runtime-state';
 import { writeFile, readFile, unlink, mkdir } from 'fs/promises';
 import { join } from 'path';
 
@@ -31,7 +31,7 @@ function isExplicitFailureCheckpoint(detail: string): boolean {
   return CHECKPOINT_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
-const CANONICAL_SETUP_NON_COMMITTABLE_FILES = ['CLAUDE.md', '.gitignore'] as const;
+const CANONICAL_SETUP_NON_COMMITTABLE_FILES = ['AGENTS.md', 'CLAUDE.md', '.gitignore'] as const;
 
 export class WorkflowService {
   private stopHeartbeat: (() => void) | null = null;
@@ -217,7 +217,9 @@ export class WorkflowService {
     await clearReconcileState(this.repo.projectRoot());
     await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
     const setupOwnedFiles: string[] = [];
-    if (await this.repo.ensureClaudeMd()) setupOwnedFiles.push('CLAUDE.md');
+    if (await this.repo.ensureClaudeMd()) {
+      setupOwnedFiles.push((await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? 'AGENTS.md');
+    }
     if (await this.repo.ensureHooks()) setupOwnedFiles.push('.claude/settings.json');
     if (await this.repo.ensureLocalStateIgnored()) setupOwnedFiles.push('.gitignore');
     await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
@@ -711,7 +713,7 @@ export class WorkflowService {
     }
   }
 
-  /** setup: 项目接管模式 - 写入CLAUDE.md */
+  /** setup: 项目接管模式 - 写入 instruction file */
   async setup(): Promise<string> {
     const existing = await this.repo.loadProgress();
     const wrote = await this.repo.ensureClaudeMd();
@@ -734,7 +736,10 @@ export class WorkflowService {
     }
 
     lines.push('');
-    if (wrote) lines.push('CLAUDE.md 已更新: 添加了工作流协议');
+    if (wrote) {
+      const instructionPath = (await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? 'AGENTS.md';
+      lines.push(`${instructionPath} 已更新: 添加了工作流协议`);
+    }
     lines.push('描述你的开发任务即可启动全自动开发');
     return lines.join('\n');
   }

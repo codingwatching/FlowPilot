@@ -28,6 +28,8 @@ import type { ExactFileSnapshot, HookEntry, SetupInjectionManifest } from './run
 const PERSISTENT_DIR = '.flowpilot';
 const LEGACY_RUNTIME_DIR = '.workflow';
 const CONFIG_FILE = 'config.json';
+const PRIMARY_INSTRUCTION_FILE = 'AGENTS.md';
+const LEGACY_INSTRUCTION_FILE = 'CLAUDE.md';
 
 const VALID_WORKFLOW_STATUS = new Set(['idle', 'running', 'reconciling', 'finishing', 'completed', 'aborted']);
 const VALID_TASK_STATUS = new Set(['pending', 'active', 'done', 'skipped', 'failed']);
@@ -162,6 +164,22 @@ function cleanupClaudeContent(content: string, manifest: SetupInjectionManifest)
   }
 
   return normalized === content ? { effect: 'noop' } : { effect: 'write', content: normalized };
+}
+
+async function resolveInstructionFile(basePath: string): Promise<{ absPath: string; relPath: string }> {
+  const primaryPath = join(basePath, PRIMARY_INSTRUCTION_FILE);
+  try {
+    await access(primaryPath);
+    return { absPath: primaryPath, relPath: PRIMARY_INSTRUCTION_FILE };
+  } catch {}
+
+  const legacyPath = join(basePath, LEGACY_INSTRUCTION_FILE);
+  try {
+    await access(legacyPath);
+    return { absPath: legacyPath, relPath: LEGACY_INSTRUCTION_FILE };
+  } catch {}
+
+  return { absPath: primaryPath, relPath: PRIMARY_INSTRUCTION_FILE };
 }
 
 function cleanupHookSettings(settings: Record<string, unknown>, manifest: SetupInjectionManifest): CleanupEffect {
@@ -498,8 +516,7 @@ export class FsWorkflowRepository implements WorkflowRepository {
   }
 
   async ensureClaudeMd(): Promise<boolean> {
-    const base = join(this.root, '..');
-    const path = join(base, 'CLAUDE.md');
+    const { absPath: path, relPath } = await resolveInstructionFile(this.base);
     const marker = '<!-- flowpilot:start -->';
     const block = (await loadProtocolTemplate(this.base)).trim();
     let created = false;
@@ -517,6 +534,7 @@ export class FsWorkflowRepository implements WorkflowRepository {
       claudeMd: {
         created,
         block,
+        path: relPath,
         ...(created ? { scaffold } : {}),
       },
     });
@@ -685,11 +703,12 @@ export class FsWorkflowRepository implements WorkflowRepository {
     await rename(path + '.tmp', path);
   }
 
-  /** 清理注入的 CLAUDE.md 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
+  /** 清理注入的 instruction file 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
   async cleanupInjections(): Promise<void> {
     const manifest = await loadSetupInjectionManifest(this.base);
 
-    const mdPath = join(this.base, 'CLAUDE.md');
+    const mdRelPath = manifest.claudeMd?.path ?? LEGACY_INSTRUCTION_FILE;
+    const mdPath = join(this.base, mdRelPath);
     try {
       const content = await readFile(mdPath, 'utf-8');
       const cleaned = cleanupClaudeContent(content, manifest);

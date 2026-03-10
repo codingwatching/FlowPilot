@@ -878,23 +878,23 @@ describe('WorkflowService 集成测试', () => {
     expect(await svc.status()).toBeNull();
   });
 
-  it('finish在 cleanup 后若 CLAUDE.md 残留用户改动则拒绝最终提交', async () => {
+  it('finish在 cleanup 后若 AGENTS.md 残留用户改动则拒绝最终提交', async () => {
     const repo = new FsWorkflowRepository(dir);
     const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
     changedFilesSpy.mockReturnValueOnce([]);
-    changedFilesSpy.mockReturnValue(['CLAUDE.md']);
+    changedFilesSpy.mockReturnValue(['AGENTS.md']);
     const commitSpy = vi.spyOn(repo, 'commit');
     vi.spyOn(repo, 'verify').mockReturnValue({ passed: true, scripts: ['npm test'] });
     svc = new WorkflowService(repo, parseTasksMarkdown);
 
     await completeWorkflow(svc);
-    await writeFile(join(dir, 'CLAUDE.md'), `${await readFile(join(dir, 'CLAUDE.md'), 'utf-8')}User residue\n`, 'utf-8');
+    await writeFile(join(dir, 'AGENTS.md'), `${await readFile(join(dir, 'AGENTS.md'), 'utf-8')}User residue\n`, 'utf-8');
     await svc.review();
 
     const msg = await svc.finish();
 
     expect(msg).toContain('拒绝最终提交');
-    expect(msg).toContain('CLAUDE.md');
+    expect(msg).toContain('AGENTS.md');
     expect(commitSpy).not.toHaveBeenCalledWith('finish', expect.any(String), expect.any(String), expect.anything());
     expect((await svc.status())?.status).toBe('finishing');
   });
@@ -1012,7 +1012,7 @@ describe('WorkflowService 集成测试', () => {
     expect(JSON.parse(await readFile(settingsPath, 'utf-8'))).toEqual({ model: 'sonnet' });
   });
 
-  it('finish会对称清理由 setup 创建且内容仍完整匹配的 CLAUDE.md、settings.json 和 .gitignore', async () => {
+  it('finish会对称清理由 setup 创建且内容仍完整匹配的 AGENTS.md、settings.json 和 .gitignore', async () => {
     const repo = new FsWorkflowRepository(dir);
     const changedFilesSpy = vi.spyOn(repo, 'listChangedFiles');
     changedFilesSpy.mockReturnValueOnce([]);
@@ -1028,13 +1028,13 @@ describe('WorkflowService 集成测试', () => {
 
     expect(await svc.status()).toBeNull();
     expect(await repo.loadProgress()).toBeNull();
-    await expect(readFile(join(dir, 'CLAUDE.md'), 'utf-8')).rejects.toThrow();
+    await expect(readFile(join(dir, 'AGENTS.md'), 'utf-8')).rejects.toThrow();
     await expect(readFile(join(dir, '.claude', 'settings.json'), 'utf-8')).rejects.toThrow();
     expect(await readFile(join(dir, '.gitignore'), 'utf-8')).toBe(LOCAL_STATE_GITIGNORE);
   });
 
   it('abort仅移除预存文件中的 FlowPilot 注入内容', async () => {
-    await writeFile(join(dir, 'CLAUDE.md'), '# Custom\n\nKeep me.\n', 'utf-8');
+    await writeFile(join(dir, 'AGENTS.md'), '# Custom\n\nKeep me.\n', 'utf-8');
     await mkdir(join(dir, '.claude'), { recursive: true });
     await writeFile(join(dir, '.claude', 'settings.json'), JSON.stringify({
       model: 'opus',
@@ -1053,7 +1053,7 @@ describe('WorkflowService 集成测试', () => {
     const msg = await svc.abort();
 
     expect(msg).toContain('已中止');
-    expect(await readFile(join(dir, 'CLAUDE.md'), 'utf-8')).toBe('# Custom\n\nKeep me.\n');
+    expect(await readFile(join(dir, 'AGENTS.md'), 'utf-8')).toBe('# Custom\n\nKeep me.\n');
     expect(JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'))).toEqual({
       model: 'opus',
       hooks: {

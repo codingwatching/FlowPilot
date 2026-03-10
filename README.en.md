@@ -211,7 +211,7 @@ Also enable **Agent Teams** by adding to `~/.claude/settings.json`:
 
 `node flow.js init` auto-generates the protocol and Hooks, and warns about missing plugins in the output.
 
-Setup/init changes to `CLAUDE.md`, `.claude/settings.json`, and `.gitignore` follow ownership-based cleanup: FlowPilot only removes what it created or injected, and `flow finish` refuses the final commit if user residue still remains afterward.
+Setup/init changes to the instruction file (new projects default to `AGENTS.md`, existing `CLAUDE.md` projects remain compatible), `.claude/settings.json`, and `.gitignore` follow ownership-based cleanup: FlowPilot only removes what it created or injected, and `flow finish` refuses the final commit if user residue still remains afterward.
 
 By default, FlowPilot also ensures these local-only paths are ignored in the repo `.gitignore`: `.workflow/` (local transient runtime state), `.flowpilot/` (local persistent product state), `.claude/settings.json` (local integration state), and `.claude/worktrees/` (local worktree directory). It does not ignore the entire `.claude/` directory.
 
@@ -229,7 +229,7 @@ npm run test:run
 cp dist/flow.js /your/project/
 cd /your/project
 
-# Initialize (protocol embedded in CLAUDE.md + Hooks injected)
+# Initialize (protocol embedded in AGENTS.md for new projects, CLAUDE.md remains supported for legacy repos + Hooks injected)
 node flow.js init
 
 # Launch CC in fully automated mode, describe your requirements, everything else is automatic
@@ -355,7 +355,7 @@ Companion npm scripts:
 ```
 node flow.js init
        ↓
-  Protocol embedded in CLAUDE.md + Hooks injected
+  Protocol embedded in the instruction file (AGENTS.md by default for new projects, CLAUDE.md for legacy repos) + Hooks injected
        ↓
   User describes requirements / provides dev docs
        ↓                          ← Everything below is fully automated, no human intervention
@@ -382,7 +382,7 @@ node flow.js init
 - **Cascade skip** — Downstream tasks depending on failed tasks auto-marked `skipped`
 - **Interruption recovery** — clean interruptions reset `active` tasks back to `pending`; when interrupted task-owned changes exist, the workflow enters `reconciling` and requires `adopt`, or handling only the listed task-owned changes before `restart`, before any next task can be dispatched
 - **Verification failure** — `flow finish` reports error, dispatch sub-agent to fix, retry finish
-- **Final commit refusal** — after verify/review, `flow finish` also checks the dirty baseline, checkpoint-owned files, and cleanup results for `CLAUDE.md` / `.claude/settings.json` / `.gitignore`; any unsafe boundary causes an explicit refusal with the file list
+- **Final commit refusal** — after verify/review, `flow finish` also checks the dirty baseline, checkpoint-owned files, and cleanup results for the instruction file (`AGENTS.md`, or legacy `CLAUDE.md`) / `.claude/settings.json` / `.gitignore`; any unsafe boundary causes an explicit refusal with the file list
 - **Loop detection** — Three-strategy defense (repeated failures/ping-pong/global circuit breaker), auto-injects warnings into next task
 - **Health check** — Active task timeout (>30min) alerts, memory bloat (>100 entries) auto-compaction
 - **Evolution rollback** — If experiments degrade metrics, `review` auto-rolls back to pre-experiment snapshot

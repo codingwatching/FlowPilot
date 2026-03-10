@@ -82,7 +82,7 @@ describe('operational readiness smoke tests', () => {
     await expect(access(join(repoDir, '.workflow'))).rejects.toThrow();
     await expect(access(join(repoDir, '.claude'))).rejects.toThrow();
     await expect(access(join(repoDir, '.claude', 'settings.json'))).rejects.toThrow();
-    await expect(access(join(repoDir, 'CLAUDE.md'))).rejects.toThrow();
+    await expect(access(join(repoDir, 'AGENTS.md'))).rejects.toThrow();
 
     expect(await readFile(join(repoDir, '.gitignore'), 'utf-8')).toBe('.workflow/\n.flowpilot/\n.claude/settings.json\n.claude/worktrees/\n');
 
