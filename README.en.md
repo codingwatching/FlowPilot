@@ -9,6 +9,13 @@ When you come back, the code is written, tests have passed, and git commits are 
 
 > Update: FlowPilot now supports `Claude Code`, `Codex`, `Cursor`, `snow-cli`, and other clients. During `init`, you can directly choose the target client and generate the matching instruction file / setup extras.
 
+> Update: The built-in `AGENTS.md` / client-specific templates now include **response-style shaping**. They rein in the overly verbose default output common in GPT-style clients and make it closer to Claude-style communication: **conclusion first, details after, concise, direct, terminal-friendly** — while still enforcing parallelism, safety confirmation, and engineering discipline.
+
+> Multi-client full-auto parallel switches:
+> - `Claude Code`: enable Agent Teams
+> - `Codex`: set `multi_agent = true` in `~/.codex/config.toml`, and preferably run with `codex --yolo`
+> - `Cursor`: enable `Agents` and set `Auto-Run Mode` to `Run Everything`
+
 ## Recent Updates
 
 **OpenSpec Integration** — Task parser supports OpenSpec checkbox format, dual-path protocol auto-selects standard/OpenSpec planning flow, supports `tasks.md` auto-discovery with user confirmation

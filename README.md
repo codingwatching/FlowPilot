@@ -9,6 +9,13 @@
 
 > 新增说明：现已兼容 `Claude Code`、`Codex`、`Cursor`、`snow-cli` 和其他客户端；`init` 时可直接选择目标客户端并生成对应的 instruction file / 配置。
 
+> 新增说明：内置 `AGENTS.md` / 客户端增强模板已加入**输出风格强化**，能把 GPT 系客户端默认偏啰嗦的回答收敛成更接近 Claude 的风格：**先结论、后细节、简洁直给、终端友好**；同时保留强并行、安全确认和工程化约束。
+
+> 多客户端全自动并行开关：
+> - `Claude Code`：开启 Agent Teams
+> - `Codex`：在 `~/.codex/config.toml` 中设置 `multi_agent = true`，建议直接用 `codex --yolo`
+> - `Cursor`：开启 `Agents`，并将 `Auto-Run Mode` 调成 `Run Everything`
+
 ## 快速开始
 
 ```bash
