@@ -89,6 +89,12 @@ You: Continue task
 CC: Resuming workflow: Blog System | Progress: 7/12 | Pending task-owned changes detected for interrupted task 008; scheduling paused
 ```
 
+Client guidance:
+- `Claude Code`: prefer `claude --dangerously-skip-permissions --continue`
+- `Codex`: re-enter the project directory, run `codex --yolo`, then say "continue task"
+- `Cursor`: reopen the project and continue in the existing chat or a new one
+- `snow-cli` / other clients: reopen the project, restore or start a new session, then say "continue task"
+
 If the worktree still has unarchived changes, `resume` also reports the real boundary state instead of using a generic success message:
 - baseline unarchived changes that existed before the workflow and are still present
 - pending task-owned changes left behind by interrupted tasks and intentionally preserved

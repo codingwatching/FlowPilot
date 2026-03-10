@@ -93,10 +93,19 @@ node flow.js init
 
 ```bash
 # 接续最近一次对话，全自动继续
+# Claude Code
 claude --dangerously-skip-permissions --continue
+
+# Codex
+codex --yolo
 ```
 
 进去后说「继续任务」，它会自动从断点继续，之前做的不会丢。
+
+- `Claude Code`：推荐直接用 `--continue` / `--resume`
+- `Codex`：重新进入项目目录后启动 `codex --yolo`，然后说「继续任务」
+- `Cursor`：重新打开项目，在原会话或新会话中说「继续任务」
+- `snow-cli` / 其他客户端：重新进入项目目录，恢复或新开会话后说「继续任务」
 
 如果工作区里仍有未归档变更，`resume` 现在会如实说明它们属于哪一类：
 - 工作流启动前就已经存在、恢复后仍保留的 baseline 未归档变更

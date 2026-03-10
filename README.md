@@ -40,8 +40,17 @@ claude --dangerously-skip-permissions
 中断后直接继续：
 
 ```bash
+# Claude Code
 claude --dangerously-skip-permissions --continue
+
+# Codex
+codex --yolo
 ```
+
+- `Claude Code`：推荐直接用 `--continue` / `--resume`
+- `Codex`：重新进入项目目录后启动 `codex --yolo`，然后说「继续任务」
+- `Cursor`：重新打开项目，在原会话或新会话中说「继续任务」
+- `snow-cli` / 其他客户端：重新进入项目目录，恢复或新开会话后说「继续任务」
 
 需要更完整说明时，再往下看「初始化与客户端选项」「执行流程」「错误处理」。
 

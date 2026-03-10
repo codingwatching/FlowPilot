@@ -269,9 +269,18 @@ claude --dangerously-skip-permissions
 
 Interruption recovery:
 ```bash
+# Claude Code
 claude --dangerously-skip-permissions --continue   # Resume most recent conversation
 claude --dangerously-skip-permissions --resume     # Pick from conversation history
+
+# Codex
+codex --yolo
 ```
+
+- `Claude Code`: prefer `--continue` / `--resume`
+- `Codex`: re-enter the project directory, launch `codex --yolo`, then say "continue task"
+- `Cursor`: reopen the project and continue in the existing chat or a new one
+- `snow-cli` / other clients: reopen the project, restore or start a new session, then say "continue task"
 
 If the worktree still has unarchived changes when resuming, `resume` explicitly tells you which changes predate the workflow, which ones are pending task-owned changes left by interrupted tasks, and whether the dirty baseline is missing.
 

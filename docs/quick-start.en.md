@@ -93,10 +93,19 @@ Whether the computer shuts down, CC crashes, or context fills up, it's all the s
 
 ```bash
 # Resume the most recent conversation, fully automated
+# Claude Code
 claude --dangerously-skip-permissions --continue
+
+# Codex
+codex --yolo
 ```
 
 Once inside, say "continue task" and it will automatically resume from the breakpoint. Nothing is lost.
+
+- `Claude Code`: prefer `--continue` / `--resume`
+- `Codex`: re-enter the project directory, launch `codex --yolo`, then say "continue task"
+- `Cursor`: reopen the project and continue in the existing chat or a new one
+- `snow-cli` / other clients: reopen the project, restore or start a new session, then say "continue task"
 
 If the worktree still has unarchived changes, `resume` now tells the truth about what survived:
 - baseline unarchived changes that already existed before the workflow started and are still present
