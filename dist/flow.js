@@ -5478,7 +5478,7 @@ var CLI = class {
       args.splice(verboseIdx, 1);
     }
     const cmd = args[0] || "";
-    const noUpdateCheck = cmd === "version" || cmd === "help" || cmd === "-h" || cmd === "--help";
+    const noUpdateCheck = cmd === "version" || cmd === "help" || cmd === "-h" || cmd === "--help" || cmd === "status" || cmd === "recall";
     try {
       let output = await this.dispatch(args);
       if (!noUpdateCheck) {
@@ -5593,6 +5593,36 @@ var CLI = class {
         const data = await s.status();
         if (!data) return "\u65E0\u6D3B\u8DC3\u5DE5\u4F5C\u6D41";
         return formatStatus(data);
+      }
+      case "pulse": {
+        const id = rest[0];
+        if (!id) throw new Error("\u9700\u8981\u4EFB\u52A1ID");
+        let phase = "analysis";
+        const phaseIdx = rest.indexOf("--phase");
+        if (phaseIdx >= 0 && rest[phaseIdx + 1]) {
+          phase = rest[phaseIdx + 1];
+        } else if (rest.length > 1 && !rest[1].startsWith("--")) {
+          phase = rest[1];
+        }
+        const phaseMap = {
+          "\u5206\u6790": "analysis",
+          "\u5B9E\u65BD": "implementation",
+          "\u9A8C\u8BC1": "verification",
+          "\u963B\u585E": "blocked"
+        };
+        const normalizedPhase = phaseMap[phase] || phase;
+        const validPhases = ["analysis", "implementation", "verification", "blocked"];
+        if (!validPhases.includes(normalizedPhase)) {
+          throw new Error(`\u65E0\u6548\u7684 phase: ${phase}\uFF0C\u53EF\u9009\u503C: analysis, implementation, verification, blocked`);
+        }
+        let note = "";
+        const noteIdx = rest.indexOf("--note");
+        if (noteIdx >= 0 && rest[noteIdx + 1]) {
+          note = rest.slice(noteIdx + 1).join(" ");
+        } else if (rest.length > 2 && !rest[2].startsWith("--")) {
+          note = rest.slice(2).join(" ");
+        }
+        return await s.pulse(id, normalizedPhase, note);
       }
       case "review":
         return await s.review();
