@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// FLOWPILOT_VERSION: 0.3.8
+// FLOWPILOT_VERSION: 0.3.9
 "use strict";
 
 // src/infrastructure/fs-repository.ts
@@ -5443,7 +5443,7 @@ function checkForUpdate() {
   const now = Date.now();
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
     if (compareVersions(currentVersion, cache.latestVersion)) {
-      return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + cache.latestVersion + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u6216\u8FD0\u884C curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
+      return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + cache.latestVersion + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u9879\u76EE\u6839\u76EE\u5F55\u8FD0\u884C: curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
     }
     return null;
   }
@@ -5459,7 +5459,7 @@ function checkForUpdate() {
   };
   saveCache2(newCache);
   if (hasUpdate) {
-    return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + latestInfo.version + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u6216\u8FD0\u884C curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
+    return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + latestInfo.version + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u9879\u76EE\u6839\u76EE\u5F55\u8FD0\u884C: curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
   }
   return null;
 }

@@ -98,7 +98,7 @@ export function checkForUpdate(): string | null {
   // 缓存有效期内，直接返回缓存结果
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
     if (compareVersions(currentVersion, cache.latestVersion)) {
-      return '🔄 发现新版本: v' + cache.latestVersion + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   或运行 curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
+      return '🔄 发现新版本: v' + cache.latestVersion + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   项目根目录运行: curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
     }
     return null;
   }
@@ -118,7 +118,7 @@ export function checkForUpdate(): string | null {
   saveCache(newCache);
 
   if (hasUpdate) {
-    return '🔄 发现新版本: v' + latestInfo.version + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   或运行 curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
+    return '🔄 发现新版本: v' + latestInfo.version + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   项目根目录运行: curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
   }
   
   return null;
