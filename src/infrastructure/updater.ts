@@ -1,6 +1,6 @@
 /**
  * @module infrastructure/updater
- * @description 自动更新检查和下载模块
+ * @description 自动更新检查模块
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
@@ -15,7 +15,6 @@ interface UpdateCache {
   checkedAt: number;
   latestVersion: string;
   currentVersion: string;
-  hasUpdate: boolean;
 }
 
 function getCachePath(): string {
@@ -35,13 +34,6 @@ function getCurrentVersion(): string {
     }
   } catch {}
   return '0.0.0';
-}
-
-function getFlowPath(): string {
-  const cwd = process.cwd();
-  return existsSync(join(cwd, 'flow.js')) 
-    ? join(cwd, 'flow.js') 
-    : join(cwd, 'dist', 'flow.js');
 }
 
 function parseVersion(version: string): number[] {
@@ -80,30 +72,6 @@ function fetchLatestInfo(): { version: string; url: string } | null {
   }
 }
 
-function downloadUpdate(url: string, version: string): boolean {
-  try {
-    const flowPath = getFlowPath();
-    console.error('正在下载新版本...');
-    
-    const cmd = 'curl -s -L "' + url + '"';
-    const content = execSync(cmd, { encoding: 'utf-8', timeout: 60000 });
-    
-    const shebang = '#!/usr/bin/env node';
-    if (content.indexOf(shebang) === -1) {
-      console.error('下载的文件不是有效的 flow.js');
-      return false;
-    }
-    
-    // 直接写入下载的内容
-    writeFileSync(flowPath, content);
-    console.error('已更新到 v' + version + '，请重新运行命令');
-    return true;
-  } catch (e) {
-    console.error('下载失败: ' + e);
-    return false;
-  }
-}
-
 function loadCache(): UpdateCache | null {
   const cachePath = getCachePath();
   if (!existsSync(cachePath)) return null;
@@ -121,35 +89,28 @@ function saveCache(cache: UpdateCache): void {
   writeFileSync(cachePath, JSON.stringify(cache, null, 2));
 }
 
-export function checkForUpdate(): boolean | null {
+/**
+ * 检查更新并返回提示信息
+ * @returns 有新版本返回提示字符串，无更新或检查失败返回 null
+ */
+export function checkForUpdate(): string | null {
   const currentVersion = getCurrentVersion();
   if (currentVersion === '0.0.0') return null;
 
   const cache = loadCache();
   const now = Date.now();
 
+  // 缓存有效期内，直接返回缓存结果
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
-    if (cache.hasUpdate) {
-      console.error('\n发现新版本: v' + cache.latestVersion + ' (当前: v' + cache.currentVersion + ')');
-      const downloaded = downloadUpdate(
-        'https://raw.githubusercontent.com/' + REPO_OWNER + '/' + REPO_NAME + '/main/dist/flow.js',
-        cache.latestVersion
-      );
-      return downloaded ? true : null;
+    if (compareVersions(currentVersion, cache.latestVersion)) {
+      return '🔄 发现新版本: v' + cache.latestVersion + ' (当前: v' + currentVersion + ')\n   输入 y 下载更新，或按其他键跳过';
     }
-    return false;
+    return null;
   }
 
+  // 尝试获取最新版本
   const latestInfo = fetchLatestInfo();
   if (!latestInfo) {
-    if (cache) return null;
-    const failedCache: UpdateCache = {
-      checkedAt: now,
-      latestVersion: currentVersion,
-      currentVersion,
-      hasUpdate: false,
-    };
-    saveCache(failedCache);
     return null;
   }
 
@@ -158,15 +119,12 @@ export function checkForUpdate(): boolean | null {
     checkedAt: now,
     latestVersion: latestInfo.version,
     currentVersion,
-    hasUpdate,
   };
   saveCache(newCache);
 
   if (hasUpdate) {
-    console.error('\n发现新版本: v' + latestInfo.version + ' (当前: v' + currentVersion + ')');
-    const downloaded = downloadUpdate(latestInfo.url, latestInfo.version);
-    return downloaded ? true : null;
+    return '🔄 发现新版本: v' + latestInfo.version + ' (当前: v' + currentVersion + ')\n   输入 y 下载更新，或按其他键跳过';
   }
   
-  return false;
+  return null;
 }

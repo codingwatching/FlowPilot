@@ -38,12 +38,11 @@ export class CLI {
     try {
       let output = await this.dispatch(args);
       
-      // 检查更新
+      // 检查更新（排除 version/help 命令）
       if (!noUpdateCheck) {
-        const updateResult = checkForUpdate();
-        if (updateResult === true) {
-          process.stderr.write('\n已自动更新到最新版本，建议重新运行原命令（如 node flow.js init）以确保初始化最新配置\n');
-          process.exit(0);
+        const updateMsg = checkForUpdate();
+        if (updateMsg) {
+          output = output + '\n\n' + updateMsg + '\n💡 提示: 请运行 node flow.js init 重新初始化';
         }
       }
       

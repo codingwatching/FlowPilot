@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// FLOWPILOT_VERSION: 0.3.6
+// FLOWPILOT_VERSION: 0.3.7
 "use strict";
 
 // src/infrastructure/fs-repository.ts
@@ -5393,10 +5393,6 @@ function getCurrentVersion() {
   }
   return "0.0.0";
 }
-function getFlowPath() {
-  const cwd = process.cwd();
-  return (0, import_fs4.existsSync)((0, import_path12.join)(cwd, "flow.js")) ? (0, import_path12.join)(cwd, "flow.js") : (0, import_path12.join)(cwd, "dist", "flow.js");
-}
 function parseVersion(version) {
   return version.replace(/^v/, "").split(".").map(Number);
 }
@@ -5426,25 +5422,6 @@ function fetchLatestInfo() {
     return null;
   }
 }
-function downloadUpdate(url, version) {
-  try {
-    const flowPath = getFlowPath();
-    console.error("\u6B63\u5728\u4E0B\u8F7D\u65B0\u7248\u672C...");
-    const cmd = 'curl -s -L "' + url + '"';
-    const content = (0, import_child_process2.execSync)(cmd, { encoding: "utf-8", timeout: 6e4 });
-    const shebang = "#!/usr/bin/env node";
-    if (content.indexOf(shebang) === -1) {
-      console.error("\u4E0B\u8F7D\u7684\u6587\u4EF6\u4E0D\u662F\u6709\u6548\u7684 flow.js");
-      return false;
-    }
-    (0, import_fs4.writeFileSync)(flowPath, content);
-    console.error("\u5DF2\u66F4\u65B0\u5230 v" + version + "\uFF0C\u8BF7\u91CD\u65B0\u8FD0\u884C\u547D\u4EE4");
-    return true;
-  } catch (e) {
-    console.error("\u4E0B\u8F7D\u5931\u8D25: " + e);
-    return false;
-  }
-}
 function loadCache2() {
   const cachePath3 = getCachePath();
   if (!(0, import_fs4.existsSync)(cachePath3)) return null;
@@ -5466,42 +5443,26 @@ function checkForUpdate() {
   const cache = loadCache2();
   const now = Date.now();
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
-    if (cache.hasUpdate) {
-      console.error("\n\u53D1\u73B0\u65B0\u7248\u672C: v" + cache.latestVersion + " (\u5F53\u524D: v" + cache.currentVersion + ")");
-      const downloaded = downloadUpdate(
-        "https://raw.githubusercontent.com/" + REPO_OWNER + "/" + REPO_NAME + "/main/dist/flow.js",
-        cache.latestVersion
-      );
-      return downloaded ? true : null;
+    if (compareVersions(currentVersion, cache.latestVersion)) {
+      return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + cache.latestVersion + " (\u5F53\u524D: v" + currentVersion + ")\n   \u8F93\u5165 y \u4E0B\u8F7D\u66F4\u65B0\uFF0C\u6216\u6309\u5176\u4ED6\u952E\u8DF3\u8FC7";
     }
-    return false;
+    return null;
   }
   const latestInfo = fetchLatestInfo();
   if (!latestInfo) {
-    if (cache) return null;
-    const failedCache = {
-      checkedAt: now,
-      latestVersion: currentVersion,
-      currentVersion,
-      hasUpdate: false
-    };
-    saveCache2(failedCache);
     return null;
   }
   const hasUpdate = compareVersions(currentVersion, latestInfo.version);
   const newCache = {
     checkedAt: now,
     latestVersion: latestInfo.version,
-    currentVersion,
-    hasUpdate
+    currentVersion
   };
   saveCache2(newCache);
   if (hasUpdate) {
-    console.error("\n\u53D1\u73B0\u65B0\u7248\u672C: v" + latestInfo.version + " (\u5F53\u524D: v" + currentVersion + ")");
-    const downloaded = downloadUpdate(latestInfo.url, latestInfo.version);
-    return downloaded ? true : null;
+    return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + latestInfo.version + " (\u5F53\u524D: v" + currentVersion + ")\n   \u8F93\u5165 y \u4E0B\u8F7D\u66F4\u65B0\uFF0C\u6216\u6309\u5176\u4ED6\u952E\u8DF3\u8FC7";
   }
-  return false;
+  return null;
 }
 
 // src/interfaces/cli.ts
@@ -5522,10 +5483,9 @@ var CLI = class {
     try {
       let output = await this.dispatch(args);
       if (!noUpdateCheck) {
-        const updateResult = checkForUpdate();
-        if (updateResult === true) {
-          process.stderr.write("\n\u5DF2\u81EA\u52A8\u66F4\u65B0\u5230\u6700\u65B0\u7248\u672C\uFF0C\u5EFA\u8BAE\u91CD\u65B0\u8FD0\u884C\u539F\u547D\u4EE4\uFF08\u5982 node flow.js init\uFF09\u4EE5\u786E\u4FDD\u521D\u59CB\u5316\u6700\u65B0\u914D\u7F6E\n");
-          process.exit(0);
+        const updateMsg = checkForUpdate();
+        if (updateMsg) {
+          output = output + "\n\n" + updateMsg + "\n\u{1F4A1} \u63D0\u793A: \u8BF7\u8FD0\u884C node flow.js init \u91CD\u65B0\u521D\u59CB\u5316";
         }
       }
       process.stdout.write(output + "\n");
