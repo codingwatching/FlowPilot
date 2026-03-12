@@ -33,7 +33,7 @@ export class CLI {
     }
     // 跳过更新检查的命令
     const cmd = args[0] || '';
-    const noUpdateCheck = cmd === 'version' || cmd === 'help' || cmd === '-h' || cmd === '--help' || cmd === 'resume' || cmd === 'status' || cmd === 'recall';
+    const noUpdateCheck = cmd === 'version' || cmd === 'help' || cmd === '-h' || cmd === '--help' || cmd === 'status' || cmd === 'recall';
 
     try {
       let output = await this.dispatch(args);
