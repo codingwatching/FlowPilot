@@ -10,6 +10,7 @@ import { execSync } from 'child_process';
 const REPO_OWNER = '6BNBN';
 const REPO_NAME = 'FlowPilot';
 const CACHE_DURATION_MS = 24 * 60 * 60 * 1000;
+const RELEASE_URL = 'https://github.com/' + REPO_OWNER + '/' + REPO_NAME + '/releases';
 
 interface UpdateCache {
   checkedAt: number;
@@ -52,7 +53,7 @@ function compareVersions(current: string, latest: string): boolean {
   return false;
 }
 
-function fetchLatestInfo(): { version: string; url: string } | null {
+function fetchLatestInfo(): { version: string } | null {
   try {
     const apiUrl = 'https://api.github.com/repos/' + REPO_OWNER + '/' + REPO_NAME + '/releases/latest';
     const cmd = 'curl -s -H "Accept: application/vnd.github+json" "' + apiUrl + '"';
@@ -60,13 +61,7 @@ function fetchLatestInfo(): { version: string; url: string } | null {
     const data = JSON.parse(result);
     const version = data.tag_name ? data.tag_name.replace(/^v/, '') : null;
     if (!version) return null;
-    
-    const flowAsset = data.assets ? data.assets.find((a: any) => a.name === 'flow.js') : null;
-    const downloadUrl = flowAsset 
-      ? flowAsset.browser_download_url 
-      : 'https://raw.githubusercontent.com/' + REPO_OWNER + '/' + REPO_NAME + '/main/dist/flow.js';
-    
-    return { version, url: downloadUrl };
+    return { version };
   } catch {
     return null;
   }
@@ -103,7 +98,7 @@ export function checkForUpdate(): string | null {
   // 缓存有效期内，直接返回缓存结果
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
     if (compareVersions(currentVersion, cache.latestVersion)) {
-      return '🔄 发现新版本: v' + cache.latestVersion + ' (当前: v' + currentVersion + ')\n   输入 y 下载更新，或按其他键跳过';
+      return '🔄 发现新版本: v' + cache.latestVersion + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   或运行 curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
     }
     return null;
   }
@@ -123,7 +118,7 @@ export function checkForUpdate(): string | null {
   saveCache(newCache);
 
   if (hasUpdate) {
-    return '🔄 发现新版本: v' + latestInfo.version + ' (当前: v' + currentVersion + ')\n   输入 y 下载更新，或按其他键跳过';
+    return '🔄 发现新版本: v' + latestInfo.version + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   或运行 curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
   }
   
   return null;

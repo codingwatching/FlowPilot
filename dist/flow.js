@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// FLOWPILOT_VERSION: 0.3.7
+// FLOWPILOT_VERSION: 0.3.8
 "use strict";
 
 // src/infrastructure/fs-repository.ts
@@ -5377,6 +5377,7 @@ var import_child_process2 = require("child_process");
 var REPO_OWNER = "6BNBN";
 var REPO_NAME = "FlowPilot";
 var CACHE_DURATION_MS = 24 * 60 * 60 * 1e3;
+var RELEASE_URL = "https://github.com/" + REPO_OWNER + "/" + REPO_NAME + "/releases";
 function getCachePath() {
   return (0, import_path12.join)(process.cwd(), ".flowpilot", "update-cache.json");
 }
@@ -5415,9 +5416,7 @@ function fetchLatestInfo() {
     const data = JSON.parse(result);
     const version = data.tag_name ? data.tag_name.replace(/^v/, "") : null;
     if (!version) return null;
-    const flowAsset = data.assets ? data.assets.find((a) => a.name === "flow.js") : null;
-    const downloadUrl = flowAsset ? flowAsset.browser_download_url : "https://raw.githubusercontent.com/" + REPO_OWNER + "/" + REPO_NAME + "/main/dist/flow.js";
-    return { version, url: downloadUrl };
+    return { version };
   } catch {
     return null;
   }
@@ -5444,7 +5443,7 @@ function checkForUpdate() {
   const now = Date.now();
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
     if (compareVersions(currentVersion, cache.latestVersion)) {
-      return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + cache.latestVersion + " (\u5F53\u524D: v" + currentVersion + ")\n   \u8F93\u5165 y \u4E0B\u8F7D\u66F4\u65B0\uFF0C\u6216\u6309\u5176\u4ED6\u952E\u8DF3\u8FC7";
+      return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + cache.latestVersion + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u6216\u8FD0\u884C curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
     }
     return null;
   }
@@ -5460,7 +5459,7 @@ function checkForUpdate() {
   };
   saveCache2(newCache);
   if (hasUpdate) {
-    return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + latestInfo.version + " (\u5F53\u524D: v" + currentVersion + ")\n   \u8F93\u5165 y \u4E0B\u8F7D\u66F4\u65B0\uFF0C\u6216\u6309\u5176\u4ED6\u952E\u8DF3\u8FC7";
+    return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + latestInfo.version + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u6216\u8FD0\u884C curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
   }
   return null;
 }
@@ -5485,7 +5484,7 @@ var CLI = class {
       if (!noUpdateCheck) {
         const updateMsg = checkForUpdate();
         if (updateMsg) {
-          output = output + "\n\n" + updateMsg + "\n\u{1F4A1} \u63D0\u793A: \u8BF7\u8FD0\u884C node flow.js init \u91CD\u65B0\u521D\u59CB\u5316";
+          output = output + "\n\n" + updateMsg + "\n\u{1F4A1} \u63D0\u793A: \u4E0B\u8F7D\u540E\u8BF7\u8FD0\u884C node flow.js init \u91CD\u65B0\u521D\u59CB\u5316";
         }
       }
       process.stdout.write(output + "\n");

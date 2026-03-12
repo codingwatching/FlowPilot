@@ -42,7 +42,7 @@ export class CLI {
       if (!noUpdateCheck) {
         const updateMsg = checkForUpdate();
         if (updateMsg) {
-          output = output + '\n\n' + updateMsg + '\n💡 提示: 请运行 node flow.js init 重新初始化';
+          output = output + '\n\n' + updateMsg + '\n💡 提示: 下载后请运行 node flow.js init 重新初始化';
         }
       }
       
