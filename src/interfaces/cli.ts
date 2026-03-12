@@ -166,6 +166,40 @@ export class CLI {
         return formatStatus(data);
       }
 
+      case 'pulse': {
+        const id = rest[0];
+        if (!id) throw new Error('需要任务ID');
+        // 解析 phase 参数
+        let phase: string = 'analysis';
+        const phaseIdx = rest.indexOf('--phase');
+        if (phaseIdx >= 0 && rest[phaseIdx + 1]) {
+          phase = rest[phaseIdx + 1];
+        } else if (rest.length > 1 && !rest[1].startsWith('--')) {
+          phase = rest[1];
+        }
+        // 中文别名映射
+        const phaseMap: Record<string, string> = {
+          '分析': 'analysis',
+          '实施': 'implementation',
+          '验证': 'verification',
+          '阻塞': 'blocked',
+        };
+        const normalizedPhase = phaseMap[phase] || phase;
+        const validPhases = ['analysis', 'implementation', 'verification', 'blocked'];
+        if (!validPhases.includes(normalizedPhase)) {
+          throw new Error(`无效的 phase: ${phase}，可选值: analysis, implementation, verification, blocked`);
+        }
+        // 解析 note 参数
+        let note = '';
+        const noteIdx = rest.indexOf('--note');
+        if (noteIdx >= 0 && rest[noteIdx + 1]) {
+          note = rest.slice(noteIdx + 1).join(' ');
+        } else if (rest.length > 2 && !rest[2].startsWith('--')) {
+          note = rest.slice(2).join(' ');
+        }
+        return await s.pulse(id, normalizedPhase as any, note);
+      }
+
       case 'review':
         return await s.review();
 
