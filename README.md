@@ -10,7 +10,7 @@
 > 新增说明：现已兼容 `Claude Code`、`Codex`、`Cursor`、`snow-cli` 和其他客户端；`init` 时可直接选择目标客户端并生成对应的 instruction file / 配置。
 
 > 新增说明：内置 instruction file / 客户端增强模板现已将**输出风格作为硬约束**，要求回答遵循：**先结论、后细节、简洁直给、终端友好**；同时补强了依赖分析、并行调度、危险操作确认等执行约束，FlowPilot 自己的终端输出也会强化分组、状态图标与下一步提示。
-> 这次升级只改**表现层**：更友好的话术、更清晰的分组、更直观的终端排版；**不会**改动工作流调度、协议流程优先级、命令语义或 checkpoint 规则。
+> 这次升级**不仅包含表现层优化**：更友好的话术、更清晰的分组、更直观的终端排版之外，也同步增强了中断恢复、收尾边界、实时进度上报与验证策略。使用前请以最新文档和命令实际输出为准。
 
 > 多客户端全自动并行开关：
 > - `Claude Code`：开启 Agent Teams
@@ -223,8 +223,8 @@ finish() 触发：
 review() 触发：
   Review（自愈）→ 对比进化前后指标，退化则自动回滚
 
-Finalization 阶段（可选）：
-  CC sub-agent + brainstorming 技能深度反思 → node flow.js evolve 应用结果
+Finalization 阶段（可选补充）：
+  需要额外人工反思时，CC sub-agent + brainstorming 技能深度反思 → node flow.js evolve 应用结果
 ```
 
 | 阶段 | 触发时机 | 做什么 |
@@ -243,10 +243,10 @@ Finalization 阶段（可选）：
 总结会列出所有任务，并用下面的标记显示状态：
 
 ```text
-[x] 已完成
-[-] 已跳过
-[!] 已失败
-[ ] 未完成
+✓ 已完成
+⊘ 已跳过
+✗ 已失败
+○ 未完成
 ```
 
 这样用户在 `.workflow/` 被清掉之前，就已经能在终端看见完整结果；同时流程内也可以验证“先总结、后清理”的顺序。需要注意的是：未执行 `flow review` 时，`flow finish` 不会结束工作流；即使 `review` 已完成，也只有最终 commit 真正成功后才会清理 `.workflow/` 并回到 idle。若 `review` 已完成但当前没有待提交文件，FlowPilot 会补一个显式最终收尾提交，以保持“只有 committed 才能结束工作流”的严格语义。
@@ -474,13 +474,13 @@ node flow.js init
   │        ↓
   └── 还有任务？──→ 是 → 循环
                    否 ↓
-              flow finish ──→ build/test/lint + Reflect + Experiment
+             flow finish ──→ build/test/lint
                    ↓
               code-review ──→ flow review（进化自愈检查）
                    ↓
               flow evolve（可选，CC 深度反思）
                    ↓
-              flow finish ──→ 验证通过 + final commit 成功 → idle
+             flow finish ──→ final commit + auto Reflect + Experiment → idle
 ```
 
 ## 错误处理

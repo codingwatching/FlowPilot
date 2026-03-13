@@ -3,38 +3,23 @@
  * @description 文件系统仓储 - 基于 .workflow/.flowpilot 目录的分层记忆存储
  */
 
-import {
-  loadActivationState,
- mkdir, readFile, writeFile, unlink, rm, rename, readdir, stat, access, rmdir } from 'fs/promises';
-import {
-  loadActivationState,
- join } from 'path';
-import {
-  loadActivationState,
- openSync, closeSync, writeFileSync } from 'fs';
-import {
-  loadActivationState,
- hostname } from 'os';
+import { mkdir, readFile, writeFile, unlink, rm, rename, readdir, stat, access, rmdir } from 'fs/promises';
+import { join } from 'path';
+import { openSync, closeSync, writeFileSync } from 'fs';
+import { hostname } from 'os';
 import type { ProgressData, SetupClient, TaskEntry, WorkflowStats, EvolutionEntry } from '../domain/types';
 import type { WorkflowRepository, VerifyResult, CommitResult, TaskPulseUpdate } from '../domain/repository';
+import { autoCommit, gitCleanup, tagTask, rollbackToTask, cleanTags as gitCleanTags, listChangedFiles as gitListChangedFiles } from './git';
+import { runVerify } from './verify';
+import { getProtocolTemplate, PROTOCOL_TEMPLATE } from './protocol-template';
 import {
-  loadActivationState,
- autoCommit, gitCleanup, tagTask, rollbackToTask, cleanTags as gitCleanTags, listChangedFiles as gitListChangedFiles } from './git';
-import {
-  loadActivationState,
- runVerify } from './verify';
-import {
-  loadActivationState,
- getProtocolTemplate, PROTOCOL_TEMPLATE } from './protocol-template';
-import {
-  loadActivationState,
-
   clearTaskPulse as clearRuntimeTaskPulse,
   createRuntimeLockMetadata,
   defaultInvalidLockStaleAfterMs,
   getRuntimeLocalityToken,
   isRuntimeLockOwnedByProcess,
   isRuntimeLockStale,
+  loadActivationState,
   loadTaskPulseState,
   loadSetupInjectionManifest,
   mergeTaskPulsesIntoProgress,
@@ -51,6 +36,9 @@ const CONFIG_FILE = 'config.json';
 const PRIMARY_INSTRUCTION_FILE = 'AGENTS.md';
 const LEGACY_INSTRUCTION_FILE = 'CLAUDE.md';
 const ROLE_INSTRUCTION_FILE = 'ROLE.md';
+const FLOWPILOT_MARKER_START = '<!-- flowpilot:start -->';
+const FLOWPILOT_MARKER_END = '<!-- flowpilot:end -->';
+const BLOCKED_NATIVE_TOOLS = ['TaskCreate', 'TaskUpdate', 'TaskList', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Explore'];
 
 const VALID_WORKFLOW_STATUS = new Set(['idle', 'running', 'reconciling', 'finishing', 'completed', 'aborted']);
 const VALID_TASK_STATUS = new Set(['pending', 'active', 'done', 'skipped', 'failed']);
@@ -174,15 +162,19 @@ function normalizeCleanupContent(content: string): string {
   return content.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
 }
 
-function cleanupClaudeContent(content: string, manifest: SetupInjectionManifest): CleanupEffect {
-  const claude = manifest.claudeMd;
-  if (!claude || claude.block.length === 0 || !content.includes(claude.block)) {
+function cleanupClaudeContent(
+  content: string,
+  injectionState?: SetupInjectionManifest['claudeMd'],
+): CleanupEffect {
+  const startIdx = content.indexOf(FLOWPILOT_MARKER_START);
+  const endIdx = content.indexOf(FLOWPILOT_MARKER_END);
+  if (startIdx < 0 || endIdx < 0 || endIdx < startIdx) {
     return { effect: 'noop' };
   }
 
-  let next = content.replace(claude.block, '');
-  if (claude.created && claude.scaffold && next.startsWith(claude.scaffold)) {
-    next = next.slice(claude.scaffold.length);
+  let next = `${content.slice(0, startIdx)}${content.slice(endIdx + FLOWPILOT_MARKER_END.length)}`;
+  if (injectionState?.created && injectionState.scaffold && next.startsWith(injectionState.scaffold)) {
+    next = next.slice(injectionState.scaffold.length);
   }
 
   const normalized = normalizeCleanupContent(next);
@@ -636,7 +628,7 @@ export class FsWorkflowRepository implements WorkflowRepository {
       created = true;
     }
 
-    const requiredPreToolUse = [hookEntry('TaskCreate'), hookEntry('TaskUpdate'), hookEntry('TaskList')];
+    const requiredPreToolUse = BLOCKED_NATIVE_TOOLS.map(hookEntry);
     const currentHooks = settings.hooks;
     const hooks = currentHooks && typeof currentHooks === 'object' && !Array.isArray(currentHooks)
       ? currentHooks as Record<string, unknown>
@@ -776,15 +768,22 @@ export class FsWorkflowRepository implements WorkflowRepository {
   /** 清理注入的 instruction file 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
   async cleanupInjections(): Promise<void> {
     const manifest = await loadSetupInjectionManifest(this.base);
+    const instructionPaths = [...new Set([
+      PRIMARY_INSTRUCTION_FILE,
+      LEGACY_INSTRUCTION_FILE,
+      ROLE_INSTRUCTION_FILE,
+      manifest.claudeMd?.path,
+      manifest.roleMd?.path,
+    ].filter(Boolean) as string[])];
 
-    for (const mdRelPath of [manifest.claudeMd?.path ?? LEGACY_INSTRUCTION_FILE, manifest.roleMd?.path].filter(Boolean) as string[]) {
+    for (const mdRelPath of instructionPaths) {
       const mdPath = join(this.base, mdRelPath);
       try {
         const content = await readFile(mdPath, 'utf-8');
-        const cleaned = cleanupClaudeContent(content, {
-          ...manifest,
-          claudeMd: mdRelPath === manifest.roleMd?.path ? manifest.roleMd : manifest.claudeMd,
-        });
+        const cleaned = cleanupClaudeContent(
+          content,
+          mdRelPath === manifest.roleMd?.path ? manifest.roleMd : manifest.claudeMd,
+        );
         if (cleaned.effect === 'delete') {
           await unlink(mdPath);
         } else if (cleaned.effect === 'write') {

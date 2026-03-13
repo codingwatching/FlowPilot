@@ -51,6 +51,16 @@ export function runVerify(cwd: string): VerifyResult {
   const steps: VerifyStepResult[] = [];
 
   for (const cmd of cmds) {
+    const vitestProjectDir = resolveVitestProjectDir(cwd, cmd);
+    if (vitestProjectDir && !hasVitestTestFiles(vitestProjectDir)) {
+      steps.push({ command: cmd, status: 'skipped', reason: '未找到测试文件' });
+      continue;
+    }
+    const npmPreflight = preflightNpmCommand(cwd, cmd);
+    if (npmPreflight) {
+      steps.push({ command: cmd, status: 'failed', reason: npmPreflight });
+      return { passed: false, status: 'failed', scripts: cmds, steps, error: `${cmd} 失败:\n${npmPreflight}` };
+    }
     try {
       execSync(cmd, { cwd, stdio: 'pipe', timeout });
       steps.push({ command: cmd, status: 'passed' });
@@ -89,6 +99,105 @@ function normalizeCommands(cwd: string, commands: string[]): string[] {
       ? `cd ${nested.dir} && npm run test -- --run`
       : command;
   });
+}
+
+function resolveVitestProjectDir(cwd: string, command: string): string | null {
+  if (command === 'npm run test -- --run') return cwd;
+  const nested = /^cd\s+(.+?)\s+&&\s+npm run test -- --run$/.exec(command.trim());
+  return nested ? join(cwd, nested[1]) : null;
+}
+
+function hasVitestTestFiles(dir: string): boolean {
+  const stack = [dir];
+  const skippedDirs = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.workflow', '.flowpilot']);
+  const testFilePattern = /\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/;
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (skippedDirs.has(entry.name)) continue;
+        if (entry.name === '__tests__') return true;
+        stack.push(join(current, entry.name));
+        continue;
+      }
+      if (testFilePattern.test(entry.name)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+interface NpmCommandTarget {
+  cwd: string;
+  scriptName: string;
+}
+
+function resolveNpmCommandTarget(cwd: string, command: string): NpmCommandTarget | null {
+  const trimmed = command.trim();
+  if (trimmed === 'npm test') return { cwd, scriptName: 'test' };
+
+  let match = /^npm run ([A-Za-z0-9:_-]+)(?:\s+--.*)?$/.exec(trimmed);
+  if (match) return { cwd, scriptName: match[1] };
+
+  match = /^cd\s+(.+?)\s+&&\s+npm run ([A-Za-z0-9:_-]+)(?:\s+--.*)?$/.exec(trimmed);
+  if (match) return { cwd: join(cwd, match[1]), scriptName: match[2] };
+
+  match = /^cd\s+(.+?)\s+&&\s+npm test$/.exec(trimmed);
+  if (match) return { cwd: join(cwd, match[1]), scriptName: 'test' };
+
+  return null;
+}
+
+function extractPrimaryExecutable(script: string): string | null {
+  const trimmed = script.trim();
+  if (!trimmed) return null;
+  const first = trimmed.split(/\s+/)[0];
+  if (!first || first.includes('/') || first.includes('\\')) return null;
+  if (first.startsWith('$') || first.includes('=')) return null;
+  return first;
+}
+
+function binaryExists(command: string, cwd: string): boolean {
+  const localBin = join(cwd, 'node_modules', '.bin', command);
+  if (existsSync(localBin)) return true;
+  try {
+    execSync(`command -v ${command}`, { cwd, stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function preflightNpmCommand(cwd: string, command: string): string | null {
+  const target = resolveNpmCommandTarget(cwd, command);
+  if (!target) return null;
+
+  const pkgPath = join(target.cwd, 'package.json');
+  if (!existsSync(pkgPath)) {
+    return 'package.json 不存在';
+  }
+
+  const scripts = loadPackageScripts(target.cwd);
+  const script = scripts[target.scriptName];
+  if (!script) {
+    return `package.json 中未定义 ${target.scriptName} script`;
+  }
+
+  const executable = extractPrimaryExecutable(script);
+  if (!executable) return null;
+  if (['npm', 'npx', 'pnpm', 'yarn', 'node', 'bash', 'sh'].includes(executable)) return null;
+  if (binaryExists(executable, target.cwd)) return null;
+  return `未找到可执行命令: ${executable}`;
 }
 
 function loadPackageScripts(cwd: string): Record<string, string> {

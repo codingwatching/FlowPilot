@@ -3,8 +3,8 @@
  * @description 运行时状态辅助 - 文件锁元数据与判定逻辑
  */
 
-import { readFileSync, unlink } from 'fs';
-import { mkdir, readFile, rename, writeFile } from 'fs/promises';
+import { readFileSync } from 'fs';
+import { mkdir, readFile, rename, unlink, writeFile } from 'fs/promises';
 import { hostname as getHostname } from 'os';
 import { join } from 'path';
 import type { ProgressData, TaskPhase } from '../domain/types';
@@ -124,6 +124,7 @@ export interface ResumeDirtyClassification {
   preservedBaselineFiles: string[];
   taskOwnedResidueFiles: string[];
   ambiguousFiles: string[];
+  setupOwnedResidueFiles: string[];
 }
 
 /** 运行时锁解析结果 */
@@ -176,11 +177,14 @@ function isRuntimeMetadataPath(file: string): boolean {
 }
 
 function isActivationMetadata(value: unknown): value is TaskActivationMetadata {
+  const pid = isRecord(value) ? value.pid : undefined;
+  const time = isRecord(value) ? value.time : undefined;
   return isRecord(value)
-    && typeof value.time === 'number'
-    && Number.isFinite(value.time)
-    && Number.isInteger(value.pid)
-    && value.pid > 0;
+    && typeof time === 'number'
+    && Number.isFinite(time)
+    && typeof pid === 'number'
+    && Number.isInteger(pid)
+    && pid > 0;
 }
 
 function normalizeDirtyFiles(files: string[]): string[] {
@@ -415,14 +419,15 @@ export function classifyResumeDirtyFiles(
   const comparison = compareDirtyFilesAgainstBaseline(currentFiles, baselineFiles ?? []);
   const setupOwnedSet = new Set(normalizeDirtyFiles(setupOwnedFiles));
   const taskOwnedSet = new Set(normalizeDirtyFiles(taskOwnedFiles));
-  const candidateFiles = (baselineFiles ? comparison.newDirtyFiles : comparison.currentFiles)
-    .filter(file => !setupOwnedSet.has(file));
+  const candidateFiles = baselineFiles ? comparison.newDirtyFiles : comparison.currentFiles;
+  const workflowCandidateFiles = candidateFiles.filter(file => !setupOwnedSet.has(file));
 
   return {
     currentFiles: comparison.currentFiles.filter(file => !setupOwnedSet.has(file)),
     preservedBaselineFiles: comparison.preservedBaselineFiles.filter(file => !setupOwnedSet.has(file)),
-    taskOwnedResidueFiles: candidateFiles.filter(file => taskOwnedSet.has(file)),
-    ambiguousFiles: candidateFiles.filter(file => !taskOwnedSet.has(file)),
+    taskOwnedResidueFiles: workflowCandidateFiles.filter(file => taskOwnedSet.has(file)),
+    ambiguousFiles: workflowCandidateFiles.filter(file => !taskOwnedSet.has(file)),
+    setupOwnedResidueFiles: candidateFiles.filter(file => setupOwnedSet.has(file)),
   };
 }
 
@@ -463,7 +468,8 @@ export function parseRuntimeLock(raw: string): ParsedRuntimeLock {
     const createdAt = parsed.createdAt;
     const localityToken = parsed.localityToken;
     if (
-      !Number.isInteger(pid)
+      typeof pid !== 'number'
+      || !Number.isInteger(pid)
       || pid <= 0
       || typeof hostname !== 'string'
       || hostname.length === 0
@@ -679,6 +685,26 @@ export async function recordOwnedFiles(
   return next;
 }
 
+async function saveOwnedFiles(basePath: string, state: OwnedFilesState): Promise<OwnedFilesState> {
+  const normalized = normalizeOwnedFilesState(state);
+  await mkdir(runtimeDir(basePath), { recursive: true });
+  const path = runtimePath(basePath, OWNED_FILES_FILE);
+  await writeFile(path + '.tmp', JSON.stringify(normalized), 'utf-8');
+  await rename(path + '.tmp', path);
+  return normalized;
+}
+
+/** 删除指定任务的 owned-files 元数据，用于 rollback / 强制重做时清边界 */
+export async function clearOwnedFilesForTasks(basePath: string, taskIds: string[]): Promise<OwnedFilesState> {
+  if (taskIds.length === 0) return loadOwnedFiles(basePath);
+  const current = await loadOwnedFiles(basePath);
+  const nextByTask = { ...current.byTask };
+  for (const taskId of taskIds) {
+    delete nextByTask[taskId];
+  }
+  return saveOwnedFiles(basePath, { byTask: nextByTask });
+}
+
 /** 读取 setup-owned 文件状态，旧工作流缺失时返回空列表 */
 export async function loadSetupOwnedFiles(basePath: string): Promise<SetupOwnedState> {
   try {
@@ -846,6 +872,21 @@ export async function mergeSetupInjectionManifest(
 export function collectOwnedFiles(state: OwnedFilesState): string[] {
   const allFiles = Object.values(state.byTask).flatMap(files => files);
   return normalizeDirtyFiles(allFiles);
+}
+
+/** 汇总指定任务的 checkpoint owned files */
+export function collectOwnedFilesForTasks(state: OwnedFilesState, taskIds: string[]): string[] {
+  const files = taskIds.flatMap(taskId => state.byTask[taskId] ?? []);
+  return normalizeDirtyFiles(files);
+}
+
+/** 覆盖指定任务的 owned-files；传空数组可视为清空该任务的 ownership */
+export async function replaceOwnedFilesForTask(
+  basePath: string,
+  taskId: string,
+  files: string[],
+): Promise<OwnedFilesState> {
+  return recordOwnedFiles(basePath, taskId, files);
 }
 
 /** 无效锁文件的默认陈旧回收阈值 */

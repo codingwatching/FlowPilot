@@ -404,6 +404,7 @@ describe('runtime-state shared metadata', () => {
       currentFiles: ['README.md', 'src/feature.ts'],
       preservedBaselineFiles: ['README.md'],
       taskOwnedResidueFiles: [],
+      setupOwnedResidueFiles: [],
       ambiguousFiles: ['src/feature.ts'],
     });
   });
@@ -418,6 +419,7 @@ describe('runtime-state shared metadata', () => {
       currentFiles: ['README.md', 'docs/note.md', 'src/feature.ts'],
       preservedBaselineFiles: ['README.md'],
       taskOwnedResidueFiles: ['src/feature.ts'],
+      setupOwnedResidueFiles: [],
       ambiguousFiles: ['docs/note.md'],
     });
   });
@@ -432,6 +434,7 @@ describe('runtime-state shared metadata', () => {
       currentFiles: ['docs/manual.md', 'src/task-owned.ts'],
       preservedBaselineFiles: [],
       taskOwnedResidueFiles: ['src/task-owned.ts'],
+      setupOwnedResidueFiles: [],
       ambiguousFiles: ['docs/manual.md'],
     });
   });

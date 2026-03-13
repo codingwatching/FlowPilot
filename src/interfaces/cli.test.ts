@@ -1,6 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CLI } from './cli';
-import { resolveSetupClientChoice } from './stdin';
+import { getCurrentVersion } from '../infrastructure/updater';
+import { readAllFromStream, resolveSetupClientChoice } from './stdin';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('resolveSetupClientChoice', () => {
   it('maps numbered options and defaults to other', () => {
@@ -58,5 +67,123 @@ describe('CLI pulse command', () => {
 
     expect(service.pulse).toHaveBeenCalledWith('001', 'blocked', '等待测试完成');
     stdoutSpy.mockRestore();
+  });
+});
+
+describe('CLI command argument parsing', () => {
+  it('parses checkpoint inline summary before --files', async () => {
+    const service = {
+      checkpoint: vi.fn(async () => 'ok'),
+    } as any;
+    const cli = new CLI(service, {
+      readStdinIfPiped: async () => '',
+    });
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    await cli.run(['node', 'flow.js', 'checkpoint', '001', '一句话摘要', '--files', 'src/a.ts']);
+
+    expect(service.checkpoint).toHaveBeenCalledWith('001', '一句话摘要', ['src/a.ts']);
+    stdoutSpy.mockRestore();
+  });
+
+  it('parses checkpoint inline summary after --files', async () => {
+    const service = {
+      checkpoint: vi.fn(async () => 'ok'),
+    } as any;
+    const cli = new CLI(service, {
+      readStdinIfPiped: async () => '',
+    });
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    await cli.run(['node', 'flow.js', 'checkpoint', '001', '--files', 'src/a.ts', '一句话摘要']);
+
+    expect(service.checkpoint).toHaveBeenCalledWith('001', '一句话摘要', ['src/a.ts']);
+    stdoutSpy.mockRestore();
+  });
+
+  it('parses adopt inline summary after --files', async () => {
+    const service = {
+      adopt: vi.fn(async () => 'ok'),
+    } as any;
+    const cli = new CLI(service, {
+      readStdinIfPiped: async () => '',
+    });
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    await cli.run(['node', 'flow.js', 'adopt', '001', '--files', 'src/a.ts', '接管摘要']);
+
+    expect(service.adopt).toHaveBeenCalledWith('001', '接管摘要', ['src/a.ts']);
+    stdoutSpy.mockRestore();
+  });
+
+  it('keeps full title for add without --type', async () => {
+    const service = {
+      add: vi.fn(async () => 'ok'),
+    } as any;
+    const cli = new CLI(service);
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    await cli.run(['node', 'flow.js', 'add', '修复', '接管', '提示']);
+
+    expect(service.add).toHaveBeenCalledWith('修复 接管 提示', 'general');
+    stdoutSpy.mockRestore();
+  });
+});
+
+describe('CLI update checks', () => {
+  it('skips update checks for resume', async () => {
+    const service = {
+      resume: vi.fn(async () => '恢复中'),
+    } as any;
+    const cli = new CLI(service, {
+      checkForUpdate: vi.fn(() => '有新版本'),
+    } as any);
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    await cli.run(['node', 'flow.js', 'resume']);
+
+    expect(service.resume).toHaveBeenCalled();
+    expect((cli as any).deps.checkForUpdate).not.toHaveBeenCalled();
+    stdoutSpy.mockRestore();
+  });
+
+  it('runs update checks for next', async () => {
+    const service = {
+      next: vi.fn(async () => null),
+    } as any;
+    const cli = new CLI(service, {
+      checkForUpdate: vi.fn(() => '有新版本'),
+    } as any);
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    await cli.run(['node', 'flow.js', 'next']);
+
+    expect((cli as any).deps.checkForUpdate).toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith('全部完成 有新版本\n');
+    stdoutSpy.mockRestore();
+  });
+});
+
+describe('version resolution', () => {
+  it('reads version from the executed script path instead of cwd', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'flowpilot-cli-test-'));
+    const flowPath = join(dir, 'flow.js');
+    await writeFile(flowPath, '#!/usr/bin/env node\n// FLOWPILOT_VERSION: 9.8.7\n', 'utf-8');
+
+    expect(getCurrentVersion(flowPath)).toBe('9.8.7');
+  });
+});
+
+describe('stdin reading', () => {
+  it('waits for slow piped input without destroying the stream', async () => {
+    const stream = new PassThrough();
+    const resultPromise = readAllFromStream(stream);
+
+    setTimeout(() => {
+      stream.write('slow ');
+      stream.end('input');
+    }, 50);
+
+    await expect(resultPromise).resolves.toBe('slow input');
   });
 });

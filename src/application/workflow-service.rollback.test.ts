@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import { WorkflowService } from './workflow-service';
 import { FsWorkflowRepository } from '../infrastructure/fs-repository';
 import { parseTasksMarkdown } from '../infrastructure/markdown-parser';
+import { loadOwnedFiles } from '../infrastructure/runtime-state';
 
 const TASKS_MD = `# 回滚分支测试
 
@@ -145,5 +146,55 @@ describe('WorkflowService rollback regression', () => {
     expect(rerunBatch[0]?.context).not.toContain('[REMEMBER] 下游A完成');
     expect(rerunBatch[0]?.context).not.toContain('[ARCHITECTURE] 下游B完成');
     expect(rerunBatch[0]?.context).not.toContain('[DECISION] 汇合任务完成');
+  });
+
+  it('rollback 会清理被重开任务的 owned-files 与 pulse 元数据', async () => {
+    await svc.init(TASKS_MD);
+
+    await svc.next();
+    await svc.checkpoint('001', '[REMEMBER] 基础后端完成', ['src/base.ts']);
+
+    const batch = await svc.nextBatch();
+    expect(batch.map(item => item.task.id)).toEqual(['002', '005']);
+    await svc.pulse('002', 'implementation', '正在实现目标任务');
+    await svc.checkpoint('002', '[DECISION] 目标任务完成', ['src/target.ts']);
+    await svc.checkpoint('005', '[REMEMBER] 无关分支完成', ['src/side.ts']);
+
+    await svc.next();
+    await svc.checkpoint('003', '[REMEMBER] 下游A完成', ['src/downstream-a.ts']);
+    await svc.next();
+    await svc.checkpoint('004', '[ARCHITECTURE] 下游B完成', ['src/downstream-b.ts']);
+    await svc.next();
+    await svc.checkpoint('006', '[DECISION] 汇合任务完成', ['src/merge.ts']);
+
+    await svc.rollback('002');
+
+    const owned = await loadOwnedFiles(dir);
+    expect(owned.byTask['001']).toEqual(['src/base.ts']);
+    expect(owned.byTask['002']).toEqual([]);
+    expect(owned.byTask['003']).toEqual([]);
+    expect(owned.byTask['004']).toEqual([]);
+    expect(owned.byTask['006']).toEqual([]);
+    expect(owned.byTask['005']).toEqual(['src/side.ts']);
+
+    const pulses = await repo.loadTaskPulses();
+    expect(pulses['002']).toBeUndefined();
+  });
+
+  it('rollback 在 reconciling 状态下拒绝执行', async () => {
+    const reconcilingRepo = new FsWorkflowRepository(dir);
+    vi.spyOn(reconcilingRepo, 'rollback').mockReturnValue(null);
+    vi.spyOn(reconcilingRepo, 'listChangedFiles')
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce(['src/target.ts']);
+    svc = new WorkflowService(reconcilingRepo, parseTasksMarkdown);
+
+    await svc.init(TASKS_MD);
+    await svc.next();
+    await svc.checkpoint('001', '[REMEMBER] 基础后端完成');
+    await svc.next();
+    await svc.resume();
+
+    await expect(svc.rollback('001')).rejects.toThrow(/reconciling/);
   });
 });

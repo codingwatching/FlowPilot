@@ -4,6 +4,7 @@
  */
 
 import { createInterface } from 'node:readline/promises';
+import type { Readable } from 'node:stream';
 import type { SetupClient } from '../domain/types';
 
 /** 检测是否为交互式终端 */
@@ -11,16 +12,19 @@ export function isTTY(): boolean {
   return process.stdin.isTTY === true;
 }
 
-/** 非TTY时读取stdin，TTY时返回空，超时返回空 */
-export function readStdinIfPiped(timeout = 30_000): Promise<string> {
-  if (isTTY()) return Promise.resolve('');
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    const timer = setTimeout(() => { process.stdin.destroy(); resolve(''); }, timeout);
-    process.stdin.on('data', c => chunks.push(c));
-    process.stdin.on('end', () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString('utf-8')); });
-    process.stdin.on('error', e => { clearTimeout(timer); reject(e); });
-  });
+/** 读取任意流的全部文本，不主动 destroy 以兼容慢速管道 */
+export async function readAllFromStream(input: Readable): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of input) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString('utf-8');
+}
+
+/** 非TTY时读取stdin，TTY时返回空 */
+export async function readStdinIfPiped(): Promise<string> {
+  if (isTTY()) return '';
+  return readAllFromStream(process.stdin);
 }
 
 const CLIENT_OPTIONS: Array<{ key: string; value: SetupClient; label: string; detail: string }> = [

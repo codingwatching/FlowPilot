@@ -107,6 +107,9 @@ function formatTaskLine(task: TaskLike): string[] {
 export function formatStatus(data: ProgressData): string {
   const activeTasks = data.tasks.filter(task => task.status === 'active');
   const blockedTasks = data.tasks.filter(task => readLiveValue(task as TaskLike, ['stage', 'phase', 'liveStage']) === 'blocked');
+  const reconcilingTasks = data.status === 'reconciling'
+    ? data.tasks.filter(task => task.status === 'pending').map(task => task.id)
+    : [];
   
   const statusEmoji = data.status === 'running' ? '🔄' : data.status === 'finishing' ? '🏁' : '⏸';
   
@@ -120,9 +123,12 @@ export function formatStatus(data: ProgressData): string {
   ];
   
   const nextSteps = [
+    reconcilingTasks.length
+      ? `⚠️ 当前处于 reconciling，请先处理待接管任务 (${reconcilingTasks.join(', ')})，使用 \`node flow.js adopt <id> --files ...\`、\`restart <id>\` 或 \`skip <id>\``
+      : '',
     activeTasks.length ? `⏳ 继续跟进进行中的任务 (${activeTasks.map(task => task.id).join(', ')})` : '',
     blockedTasks.length ? `⚠️ 优先处理阻塞任务 (${blockedTasks.map(task => task.id).join(', ')})` : '',
-    !activeTasks.length && !blockedTasks.length && data.tasks.some(task => task.status === 'pending')
+    data.status !== 'reconciling' && !activeTasks.length && !blockedTasks.length && data.tasks.some(task => task.status === 'pending')
       ? '💡 运行 `node flow.js next` 获取下一批任务'
       : '',
   ].filter(Boolean);

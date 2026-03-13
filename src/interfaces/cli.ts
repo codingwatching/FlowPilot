@@ -3,18 +3,84 @@
  * @description CLI 命令路由
  */
 
-import { existsSync, readFileSync } from 'fs';
-import { resolve, relative, join } from 'path';
+import { readFileSync } from 'fs';
+import { resolve, relative } from 'path';
 import type { WorkflowService } from '../application/workflow-service';
 import { formatStatus, formatTask, formatBatch } from './formatter';
 import { promptSetupClient, readStdinIfPiped } from './stdin';
 import { enableVerbose } from '../infrastructure/logger';
-import { checkForUpdate } from '../infrastructure/updater';
+import { checkForUpdate, getCurrentVersion } from '../infrastructure/updater';
 import type { SetupClient } from '../domain/types';
 
 interface CliDeps {
   readStdinIfPiped?: typeof readStdinIfPiped;
   promptSetupClient?: () => Promise<SetupClient>;
+  checkForUpdate?: (executablePath?: string) => string | null;
+  getCurrentVersion?: (executablePath?: string) => string;
+  getExecutablePath?: () => string | undefined;
+}
+
+interface ParsedPayload {
+  detail: string;
+  files?: string[];
+}
+
+const UPDATE_SKIP_COMMANDS = new Set(['version', 'help', '-h', '--help', 'resume', 'status', 'recall']);
+const VALID_TASK_TYPES = new Set(['frontend', 'backend', 'general']);
+
+function looksLikePathToken(token: string): boolean {
+  return /^[./~]/.test(token) || token.includes('/') || token.includes('\\') || token.includes('.');
+}
+
+function resolveProjectFile(pathArg: string): string {
+  const filePath = resolve(pathArg);
+  if (relative(process.cwd(), filePath).startsWith('..')) throw new Error('--file 路径不能超出项目目录');
+  return filePath;
+}
+
+async function parseDetailAndFiles(
+  rest: string[],
+  readInput: () => Promise<string>,
+): Promise<ParsedPayload> {
+  const detailTokens: string[] = [];
+  const files: string[] = [];
+  let detailFromFile: string | null = null;
+
+  for (let i = 1; i < rest.length; i++) {
+    const token = rest[i];
+    if (token === '--file') {
+      const fileArg = rest[i + 1];
+      if (!fileArg) throw new Error('需要 --file 路径');
+      detailFromFile = readFileSync(resolveProjectFile(fileArg), 'utf-8');
+      i += 1;
+      continue;
+    }
+    if (token === '--files') {
+      let sawFile = false;
+      while (i + 1 < rest.length && !rest[i + 1].startsWith('--')) {
+        const candidate = rest[i + 1];
+        if (sawFile && !looksLikePathToken(candidate)) {
+          detailTokens.push(...rest.slice(i + 1));
+          i = rest.length;
+          break;
+        }
+        files.push(candidate);
+        sawFile = true;
+        i += 1;
+      }
+      continue;
+    }
+    if (token.startsWith('--')) {
+      continue;
+    }
+    detailTokens.push(token);
+  }
+
+  const detail = detailFromFile ?? (detailTokens.length ? detailTokens.join(' ') : await readInput());
+  return {
+    detail: detail.trim(),
+    ...(files.length ? { files } : {}),
+  };
 }
 
 export class CLI {
@@ -33,16 +99,17 @@ export class CLI {
     }
     // 跳过更新检查的命令
     const cmd = args[0] || '';
-    const noUpdateCheck = cmd === 'version' || cmd === 'help' || cmd === '-h' || cmd === '--help' || cmd === 'status' || cmd === 'recall';
+    const noUpdateCheck = UPDATE_SKIP_COMMANDS.has(cmd);
+    const executablePath = (this.deps.getExecutablePath ?? (() => process.argv[1]))();
 
     try {
       let output = await this.dispatch(args);
       
       // 检查更新（排除 version/help 命令）
       if (!noUpdateCheck) {
-        const updateMsg = checkForUpdate();
+        const updateMsg = (this.deps.checkForUpdate ?? checkForUpdate)(executablePath);
         if (updateMsg) {
-          output = output + '\n\n' + updateMsg + '\n💡 提示: 下载后请运行 node flow.js init 重新初始化';
+          output = output + ' ' + updateMsg;
         }
       }
       
@@ -59,16 +126,9 @@ export class CLI {
 
     // version 命令单独处理
     if (cmd === 'version') {
-      const cwd = process.cwd();
-      const flowPath = existsSync(join(cwd, 'flow.js')) 
-        ? join(cwd, 'flow.js') 
-        : join(cwd, 'dist', 'flow.js');
-      let version = 'unknown';
-      if (existsSync(flowPath)) {
-        const content = readFileSync(flowPath, 'utf-8');
-        const match = content.match(/\/\/ FLOWPILOT_VERSION:\s*(\d+\.\d+\.\d+)/);
-        if (match) version = match[1];
-      }
+      const executablePath = (this.deps.getExecutablePath ?? (() => process.argv[1]))();
+      const version = (this.deps.getCurrentVersion ?? getCurrentVersion)(executablePath);
+      if (version === '0.0.0') return 'FlowPilot vunknown';
       return 'FlowPilot v' + version;
     }
 
@@ -101,51 +161,15 @@ export class CLI {
       case 'checkpoint': {
         const id = rest[0];
         if (!id) throw new Error('需要任务ID');
-        const filesIdx = rest.indexOf('--files');
-        const fileIdx = rest.indexOf('--file');
-        let detail;
-        let files;
-        if (filesIdx >= 0) {
-          files = [];
-          for (let i = filesIdx + 1; i < rest.length && !rest[i].startsWith('--'); i++) {
-            files.push(rest[i]);
-          }
-        }
-        if (fileIdx >= 0 && rest[fileIdx + 1]) {
-          const filePath = resolve(rest[fileIdx + 1]);
-          if (relative(process.cwd(), filePath).startsWith('..')) throw new Error('--file 路径不能超出项目目录');
-          detail = readFileSync(filePath, 'utf-8');
-        } else if (rest.length > 1 && fileIdx < 0 && filesIdx < 0) {
-          detail = rest.slice(1).join(' ');
-        } else {
-          detail = await (this.deps.readStdinIfPiped ?? readStdinIfPiped)();
-        }
-        return await s.checkpoint(id, detail.trim(), files);
+        const parsed = await parseDetailAndFiles(rest, this.deps.readStdinIfPiped ?? readStdinIfPiped);
+        return await s.checkpoint(id, parsed.detail, parsed.files);
       }
 
       case 'adopt': {
         const id = rest[0];
         if (!id) throw new Error('需要任务ID');
-        const filesIdx = rest.indexOf('--files');
-        const fileIdx = rest.indexOf('--file');
-        let detail;
-        let files;
-        if (filesIdx >= 0) {
-          files = [];
-          for (let i = filesIdx + 1; i < rest.length && !rest[i].startsWith('--'); i++) {
-            files.push(rest[i]);
-          }
-        }
-        if (fileIdx >= 0 && rest[fileIdx + 1]) {
-          const filePath = resolve(rest[fileIdx + 1]);
-          if (relative(process.cwd(), filePath).startsWith('..')) throw new Error('--file 路径不能超出项目目录');
-          detail = readFileSync(filePath, 'utf-8');
-        } else if (rest.length > 1 && fileIdx < 0 && filesIdx < 0) {
-          detail = rest.slice(1).join(' ');
-        } else {
-          detail = await (this.deps.readStdinIfPiped ?? readStdinIfPiped)();
-        }
-        return await s.adopt(id, detail.trim(), files);
+        const parsed = await parseDetailAndFiles(rest, this.deps.readStdinIfPiped ?? readStdinIfPiped);
+        return await s.adopt(id, parsed.detail, parsed.files);
       }
 
       case 'restart': {
@@ -233,9 +257,10 @@ export class CLI {
       case 'add': {
         const typeIdx = rest.indexOf('--type');
         const rawType = (typeIdx >= 0 && rest[typeIdx + 1]) || 'general';
-        const validTypes = new Set(['frontend', 'backend', 'general']);
-        const type = validTypes.has(rawType) ? rawType : 'general';
-        const title = rest.filter((_, i) => i !== typeIdx && i !== typeIdx + 1).join(' ');
+        const type = VALID_TASK_TYPES.has(rawType) ? rawType : 'general';
+        const title = rest
+          .filter((_, i) => typeIdx < 0 || (i !== typeIdx && i !== typeIdx + 1))
+          .join(' ');
         if (!title) throw new Error('需要任务描述');
         return await s.add(title, type as any);
       }

@@ -5,7 +5,7 @@
 
 import type { ProgressData, SetupClient, TaskEntry, TaskPhase, WorkflowStats } from '../domain/types';
 import type { WorkflowDefinition } from '../domain/workflow';
-import type { CommitResult, WorkflowRepository } from '../domain/repository';
+import type { CommitResult, VerifyResult, WorkflowRepository } from '../domain/repository';
 import { makeTaskId, cascadeSkip, findNextTask, findParallelTasks, completeTask, failTask, resumeProgress, isAllDone, reopenRollbackBranch } from '../domain/task-store';
 import { runLifecycleHook } from '../infrastructure/hooks';
 import { log, setWorkflowName } from '../infrastructure/logger';
@@ -15,7 +15,7 @@ import { extractAll } from '../infrastructure/extractor';
 import { truncateHeadTail, computeMaxChars } from '../infrastructure/truncation';
 import { detect as detectLoop, type LoopDetection } from '../infrastructure/loop-detector';
 import { startHeartbeat, runHeartbeat } from '../infrastructure/heartbeat';
-import { classifyResumeDirtyFiles, clearReconcileState, collectOwnedFiles, compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, loadOwnedFiles, loadReconcileState, loadSetupInjectionManifest, loadSetupOwnedFiles, recordOwnedFiles, recordTaskActivations, saveDirtyBaseline, saveReconcileState, saveSetupOwnedFiles } from '../infrastructure/runtime-state';
+import { classifyResumeDirtyFiles, clearReconcileState, collectOwnedFiles, collectOwnedFilesForTasks, compareDirtyFilesAgainstBaseline, getTaskActivationAge, loadDirtyBaseline, loadOwnedFiles, loadReconcileState, loadSetupInjectionManifest, loadSetupOwnedFiles, recordOwnedFiles, recordTaskActivations, replaceOwnedFilesForTask, saveDirtyBaseline, saveReconcileState, saveSetupOwnedFiles } from '../infrastructure/runtime-state';
 import { formatFinalSummary } from '../interfaces/formatter';
 import { execFileSync } from 'node:child_process';
 import { writeFile, readFile, unlink, mkdir, rename } from 'fs/promises';
@@ -28,14 +28,17 @@ const CHECKPOINT_FAILURE_PATTERNS = [
   /^无法(?:完成|继续|执行|连接|获取|读取|写入|启动|构建|运行|应用)/,
 ] as const;
 
+interface ScopedReconcileDirtyState {
+  residueFiles: string[];
+  ambiguousFiles: string[];
+}
+
 function isExplicitFailureCheckpoint(detail: string): boolean {
   const normalized = detail.trim();
   return CHECKPOINT_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 const CANONICAL_SETUP_NON_COMMITTABLE_FILES = ['AGENTS.md', 'CLAUDE.md', '.gitignore'] as const;
-const NON_BLOCKING_SETUP_RESIDUE_FILES = new Set(['AGENTS.md', 'CLAUDE.md', 'ROLE.md']);
-
 export class WorkflowService {
   private stopHeartbeat: (() => void) | null = null;
   private readonly locallyActivatedTaskIds = new Set<string>();
@@ -84,6 +87,44 @@ export class WorkflowService {
       : 'other';
   }
 
+  private async withRepoLock<T>(fn: () => Promise<T>): Promise<T> {
+    await this.repo.lock();
+    try {
+      return await fn();
+    } finally {
+      await this.repo.unlock();
+    }
+  }
+
+  private async getScopedReconcileDirtyState(taskId: string, reconcileTaskIds?: string[]): Promise<ScopedReconcileDirtyState> {
+    const currentDirtyFiles = this.repo.listChangedFiles();
+    const baseline = await loadDirtyBaseline(this.repo.projectRoot());
+    const setupOwnedSet = await this.loadSetupOwnedSet();
+    const ownedState = await loadOwnedFiles(this.repo.projectRoot());
+    const scopedReconcileTaskIds = reconcileTaskIds ?? (await loadReconcileState(this.repo.projectRoot())).taskIds;
+    const otherTaskIds = scopedReconcileTaskIds.filter(id => id !== taskId);
+    const currentTaskOwnedFiles = collectOwnedFilesForTasks(ownedState, [taskId]);
+    const otherTaskOwnedFiles = collectOwnedFilesForTasks(ownedState, otherTaskIds);
+    const scoped = classifyResumeDirtyFiles(
+      currentDirtyFiles,
+      baseline?.files ?? null,
+      [...setupOwnedSet],
+      currentTaskOwnedFiles,
+    );
+    const otherScoped = classifyResumeDirtyFiles(
+      currentDirtyFiles,
+      baseline?.files ?? null,
+      [...setupOwnedSet],
+      otherTaskOwnedFiles,
+    );
+    const otherResidueFiles = new Set(otherScoped.taskOwnedResidueFiles);
+
+    return {
+      residueFiles: scoped.taskOwnedResidueFiles,
+      ambiguousFiles: scoped.ambiguousFiles.filter(file => !otherResidueFiles.has(file)),
+    };
+  }
+
   private finalSummaryPath(): string {
     return join(this.repo.projectRoot(), '.workflow', 'final-summary.md');
   }
@@ -123,11 +164,20 @@ export class WorkflowService {
     lines: string[];
     residueFiles: string[];
     ambiguousFiles: string[];
+    setupOwnedResidueFiles: string[];
     baselineFound: boolean;
   }> {
     const baseline = await loadDirtyBaseline(this.repo.projectRoot());
     const setupOwnedSet = await this.loadSetupOwnedSet();
+    const setupOwnedFiles = [...setupOwnedSet];
     const taskOwnedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
+    const setupOwnedClassification = classifyResumeDirtyFiles(
+      currentDirtyFiles,
+      baseline?.files ?? null,
+      [],
+      setupOwnedFiles,
+    );
+    const setupOwnedResidueFiles = setupOwnedClassification.taskOwnedResidueFiles;
     const classified = classifyResumeDirtyFiles(
       currentDirtyFiles,
       baseline?.files ?? null,
@@ -143,6 +193,7 @@ export class WorkflowService {
           lines: ['未找到 dirty baseline；当前工作区无未归档变更，但无法证明这是干净重启'],
           residueFiles,
           ambiguousFiles,
+          setupOwnedResidueFiles,
           baselineFound: false,
         };
       }
@@ -157,10 +208,15 @@ export class WorkflowService {
         lines.push(`保守保留 ${ambiguousFiles.length} 个归属未明变更（可能包含用户手动修改/删除，FlowPilot 不会自动恢复这些文件）:`);
         lines.push(...ambiguousFiles.map(file => `- ${file}`));
       }
+      if (setupOwnedResidueFiles.length) {
+        lines.push(`另有 ${setupOwnedResidueFiles.length} 个 setup-owned 文件残留改动（恢复阶段仅提示，finish 时仍会严格校验）:`);
+        lines.push(...setupOwnedResidueFiles.map(file => `- ${file}`));
+      }
       return {
         lines,
         residueFiles,
         ambiguousFiles,
+        setupOwnedResidueFiles,
         baselineFound: false,
       };
     }
@@ -170,6 +226,7 @@ export class WorkflowService {
         lines: ['当前工作区无待接管变更，本次恢复是干净重启'],
         residueFiles: [],
         ambiguousFiles: [],
+        setupOwnedResidueFiles,
         baselineFound: true,
       };
     }
@@ -187,8 +244,12 @@ export class WorkflowService {
       lines.push(`发现 ${ambiguousFiles.length} 个工作流期间新增但归属未明的变更（可能包含用户手动修改/删除，FlowPilot 不会自动恢复这些文件）:`);
       lines.push(...ambiguousFiles.map(file => `- ${file}`));
     }
+    if (setupOwnedResidueFiles.length) {
+      lines.push(`发现 ${setupOwnedResidueFiles.length} 个 setup-owned 文件残留改动（恢复阶段仅提示，finish 时仍会严格校验）:`);
+      lines.push(...setupOwnedResidueFiles.map(file => `- ${file}`));
+    }
 
-    return { lines, residueFiles, ambiguousFiles, baselineFound: true };
+    return { lines, residueFiles, ambiguousFiles, setupOwnedResidueFiles, baselineFound: true };
   }
 
   private async assertNotReconciling(data: ProgressData): Promise<void> {
@@ -246,71 +307,68 @@ export class WorkflowService {
 
   /** init: 解析任务markdown → 生成progress/tasks */
   async init(tasksMd: string, force = false): Promise<ProgressData> {
-    // 自愈检查：验证上轮实验效果
-    try {
-      const reviewResult = await review(this.repo.projectRoot());
-      if (reviewResult.rolledBack) log.info(`[自愈] 已回滚: ${reviewResult.rollbackReason}`);
-      for (const c of reviewResult.checks.filter(c => !c.passed)) log.info(`[自愈] ${c.name}: ${c.detail}`);
-    } catch (e) {
-      log.debug(`[自愈] review 跳过: ${e}`);
-    }
+    return this.withRepoLock(async () => {
+      // 自愈检查：验证上轮实验效果
+      try {
+        const reviewResult = await review(this.repo.projectRoot());
+        if (reviewResult.rolledBack) log.info(`[自愈] 已回滚: ${reviewResult.rollbackReason}`);
+        for (const c of reviewResult.checks.filter(c => !c.passed)) log.info(`[自愈] ${c.name}: ${c.detail}`);
+      } catch (e) {
+        log.debug(`[自愈] review 跳过: ${e}`);
+      }
 
-    const existing = await this.repo.loadProgress();
-    if (existing && existing.status === 'running' && !force) {
-      throw new Error(`已有进行中的工作流: ${existing.name}，使用 --force 覆盖`);
-    }
-    const def = this.parse(tasksMd);
-    const tasks: TaskEntry[] = def.tasks.map((t, i) => ({
-      id: makeTaskId(i + 1),
-      title: t.title,
-      description: t.description,
-      type: t.type,
-      status: 'pending',
-      deps: t.deps,
-      summary: '',
-      retries: 0,
-    }));
-    const data: ProgressData = {
-      name: def.name,
-      status: 'running',
-      current: null,
-      tasks,
-      startTime: new Date().toISOString(),
-    };
-    this.locallyActivatedTaskIds.clear();
-    setWorkflowName(def.name);
-    await this.repo.saveProgress(data);
-    await this.repo.saveTasks(tasksMd);
-    await this.repo.saveSummary(`# ${def.name}\n\n${def.description}\n`);
-    await clearReconcileState(this.repo.projectRoot());
-    await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
-    const client = await this.loadPreferredClient();
-    const setupOwnedFiles: string[] = [];
-    if (await this.repo.ensureClaudeMd(client)) {
-      setupOwnedFiles.push((await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? 'AGENTS.md');
-    }
-    if (client === 'snow-cli' && await this.repo.ensureRoleMd(client)) setupOwnedFiles.push('ROLE.md');
-    if (client === 'claude' && await this.repo.ensureHooks()) setupOwnedFiles.push('.claude/settings.json');
-    if (await this.repo.ensureLocalStateIgnored()) setupOwnedFiles.push('.gitignore');
-    await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
+      const existing = await this.repo.loadProgress();
+      if (existing && ['running', 'reconciling', 'finishing'].includes(existing.status) && !force) {
+        throw new Error(`已有进行中的工作流: ${existing.name}（状态: ${existing.status}），使用 --force 覆盖`);
+      }
+      const def = this.parse(tasksMd);
+      const tasks: TaskEntry[] = def.tasks.map((t, i) => ({
+        id: makeTaskId(i + 1),
+        title: t.title,
+        description: t.description,
+        type: t.type,
+        status: 'pending',
+        deps: t.deps,
+        summary: '',
+        retries: 0,
+      }));
+      const data: ProgressData = {
+        name: def.name,
+        status: 'running',
+        current: null,
+        tasks,
+        startTime: new Date().toISOString(),
+      };
+      this.locallyActivatedTaskIds.clear();
+      setWorkflowName(def.name);
+      await this.repo.saveProgress(data);
+      await this.repo.saveTasks(tasksMd);
+      await this.repo.saveSummary(`# ${def.name}\n\n${def.description}\n`);
+      await clearReconcileState(this.repo.projectRoot());
+      await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
+      const client = await this.loadPreferredClient();
+      const setupOwnedFiles: string[] = [];
+      if (await this.repo.ensureClaudeMd(client)) {
+        setupOwnedFiles.push((await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? 'AGENTS.md');
+      }
+      if (client === 'snow-cli' && await this.repo.ensureRoleMd(client)) setupOwnedFiles.push('ROLE.md');
+      if (client === 'claude' && await this.repo.ensureHooks()) setupOwnedFiles.push('.claude/settings.json');
+      if (await this.repo.ensureLocalStateIgnored()) setupOwnedFiles.push('.gitignore');
+      await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
 
-    // 历史经验分析：读取历史统计，输出建议，自动调整参数
-    await this.applyHistoryInsights();
+      await this.applyHistoryInsights();
+      await decayMemory(this.repo.projectRoot());
 
-    // 衰减归档过期记忆
-    await decayMemory(this.repo.projectRoot());
+      const memories = await loadMemory(this.repo.projectRoot());
+      if (memories.filter(e => !e.archived).length > 50) {
+        await compactMemory(this.repo.projectRoot());
+      }
 
-    // 记忆条目超过阈值时自动压缩
-    const memories = await loadMemory(this.repo.projectRoot());
-    if (memories.filter(e => !e.archived).length > 50) {
-      await compactMemory(this.repo.projectRoot());
-    }
+      this.stopHeartbeat?.();
+      this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
 
-    // 启动心跳自检
-    this.stopHeartbeat?.();
-    this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
-
-    return data;
+      return data;
+    });
   }
 
   /** next: 获取下一个可执行任务（含依赖上下文） */
@@ -541,89 +599,90 @@ export class WorkflowService {
 
   /** resume: 中断恢复 */
   async resume(): Promise<string> {
-    const data = await this.repo.loadProgress();
-    if (!data) return '无活跃工作流，等待需求输入';
-    log.debug(`resume: status=${data.status}, current=${data.current}`);
-    if (data.status === 'idle') return '工作流待命中，等待需求输入';
-    if (data.status === 'completed') return '工作流已全部完成';
-    if (data.status === 'finishing') {
-      return [
-        '**═══ 当前状态 ═══**',
-        `🏁 工作流: ${data.name || '未命名工作流'}`,
-        '📍 状态: 收尾阶段',
-        '',
-        '**═══ 下一步 ═══**',
-        '👉 运行 `node flow.js finish` 完成最终收尾',
-      ].join('\n');
-    }
-    if (data.status === 'reconciling') {
-      const doneCount = data.tasks.filter(t => t.status === 'done').length;
-      const total = data.tasks.length;
-      const reconcile = await loadReconcileState(this.repo.projectRoot());
+    return this.withRepoLock(async () => {
+      const data = await this.repo.loadProgress();
+      if (!data) return '无活跃工作流，等待需求输入';
+      log.debug(`resume: status=${data.status}, current=${data.current}`);
+      if (data.status === 'idle') return '工作流待命中，等待需求输入';
+      if (data.status === 'completed') return '工作流已全部完成';
+      if (data.status === 'finishing') {
+        return [
+          '**═══ 当前状态 ═══**',
+          `🏁 工作流: ${data.name || '未命名工作流'}`,
+          '📍 状态: 收尾阶段',
+          '',
+          '**═══ 下一步 ═══**',
+          '👉 运行 `node flow.js finish` 完成最终收尾',
+        ].join('\n');
+      }
+      if (data.status === 'reconciling') {
+        const doneCount = data.tasks.filter(t => t.status === 'done').length;
+        const total = data.tasks.length;
+        const reconcile = await loadReconcileState(this.repo.projectRoot());
+        const dirtyState = await this.getResumeDirtyState();
+
+        return [
+          '**═══ 恢复工作流 ═══**',
+          `📂 ${data.name}`,
+          `📊 进度: ${doneCount}/${total}`,
+          `⚠️ 待接管中断任务: ${reconcile.taskIds.join(', ') || data.current || '未知'}`,
+          '',
+          '👉 请先执行 `node flow.js adopt <id> --files ...`',
+          '   或在确认并处理列出的本任务变更后 `node flow.js restart <id>`',
+          '   若存在归属未明变更，必须先人工确认；不要整文件 git restore',
+          '   不得处理 baseline 变更或未列出的其他项目代码',
+          ...dirtyState.lines,
+        ].join('\n');
+      }
+
+      const hadActiveTasks = data.tasks.filter(t => t.status === 'active').map(t => t.id);
+      const { data: resumedData, resetId } = resumeProgress(data);
+      this.locallyActivatedTaskIds.clear();
       const dirtyState = await this.getResumeDirtyState();
+      const shouldReconcile = hadActiveTasks.length > 0 && (dirtyState.residueFiles.length > 0 || dirtyState.ambiguousFiles.length > 0);
+      const newData = shouldReconcile
+        ? { ...resumedData, status: 'reconciling' as const, current: hadActiveTasks[0] ?? resumedData.current }
+        : resumedData;
 
-      return [
+      await this.repo.saveProgress(newData);
+      if (shouldReconcile) {
+        await saveReconcileState(this.repo.projectRoot(), hadActiveTasks);
+      } else {
+        await clearReconcileState(this.repo.projectRoot());
+      }
+
+      if (resetId && !shouldReconcile) {
+        log.debug(`resume: 重置任务 ${resetId}`);
+        this.repo.cleanup();
+      }
+
+      const doneCount = newData.tasks.filter(t => t.status === 'done').length;
+      const total = newData.tasks.length;
+
+      this.stopHeartbeat?.();
+      this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
+
+      const statusIcon = shouldReconcile ? '⚠️' : (resetId ? '🔄' : '▶️');
+      const statusMsg = shouldReconcile
+        ? `检测到中断任务 ${hadActiveTasks.join(', ')} 的待处理变更，已暂停调度`
+        : (resetId ? `中断任务 ${resetId} 已重置，将重新执行` : '继续执行');
+
+      const lines = [
         '**═══ 恢复工作流 ═══**',
-        `📂 ${data.name}`,
+        `📂 ${newData.name}`,
         `📊 进度: ${doneCount}/${total}`,
-        `⚠️ 待接管中断任务: ${reconcile.taskIds.join(', ') || data.current || '未知'}`,
-        '',
-        '👉 请先执行 `node flow.js adopt <id> --files ...`',
-        '   或在确认并处理列出的本任务变更后 `node flow.js restart <id>`',
-        '   若存在归属未明变更，必须先人工确认；不要整文件 git restore',
-        '   不得处理 baseline 变更或未列出的其他项目代码',
+        statusIcon + ' ' + statusMsg,
         ...dirtyState.lines,
-      ].join('\n');
-    }
+      ];
 
-    const hadActiveTasks = data.tasks.filter(t => t.status === 'active').map(t => t.id);
-    const { data: resumedData, resetId } = resumeProgress(data);
-    this.locallyActivatedTaskIds.clear();
-    const dirtyState = await this.getResumeDirtyState();
-    const shouldReconcile = hadActiveTasks.length > 0 && (dirtyState.residueFiles.length > 0 || dirtyState.ambiguousFiles.length > 0);
-    const newData = shouldReconcile
-      ? { ...resumedData, status: 'reconciling' as const, current: hadActiveTasks[0] ?? resumedData.current }
-      : resumedData;
+      if (shouldReconcile) {
+        lines.push('');
+        lines.push('👉 请先执行 `node flow.js adopt ' + hadActiveTasks[0] + ' --files ...`');
+        lines.push('   或确认并处理列出的本任务变更后 `node flow.js restart ' + hadActiveTasks[0] + '`');
+      }
 
-    await this.repo.saveProgress(newData);
-    if (shouldReconcile) {
-      await saveReconcileState(this.repo.projectRoot(), hadActiveTasks);
-    } else {
-      await clearReconcileState(this.repo.projectRoot());
-    }
-
-    if (resetId && !shouldReconcile) {
-      log.debug(`resume: 重置任务 ${resetId}`);
-      this.repo.cleanup();
-    }
-
-    const doneCount = newData.tasks.filter(t => t.status === 'done').length;
-    const total = newData.tasks.length;
-
-    // 启动心跳自检
-    this.stopHeartbeat?.();
-    this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
-
-    const statusIcon = shouldReconcile ? '⚠️' : (resetId ? '🔄' : '▶️');
-    const statusMsg = shouldReconcile
-      ? `检测到中断任务 ${hadActiveTasks.join(', ')} 的待处理变更，已暂停调度`
-      : (resetId ? `中断任务 ${resetId} 已重置，将重新执行` : '继续执行');
-    
-    const lines = [
-      '**═══ 恢复工作流 ═══**',
-      `📂 ${newData.name}`,
-      `📊 进度: ${doneCount}/${total}`,
-      statusIcon + ' ' + statusMsg,
-      ...dirtyState.lines,
-    ];
-    
-    if (shouldReconcile) {
-      lines.push('');
-      lines.push('👉 请先执行 `node flow.js adopt ' + hadActiveTasks[0] + ' --files ...`');
-      lines.push('   或确认并处理列出的本任务变更后 `node flow.js restart ' + hadActiveTasks[0] + '`');
-    }
-    
-    return lines.join('\n');
+      return lines.join('\n');
+    });
   }
 
   async adopt(id: string, detail: string, files?: string[]): Promise<string> {
@@ -640,13 +699,31 @@ export class WorkflowService {
       const task = data.tasks.find(t => t.id === id);
       if (!task) throw new Error(`任务 ${id} 不存在`);
 
+      const scopedDirtyState = await this.getScopedReconcileDirtyState(id, reconcile.taskIds);
+      if (scopedDirtyState.ambiguousFiles.length > 0) {
+        throw new Error(`检测到 ${scopedDirtyState.ambiguousFiles.length} 个归属未明变更：${scopedDirtyState.ambiguousFiles.join(', ')}。这些文件可能包含用户手动修改/删除；请先人工确认。若这些文件属于任务产物，请先更新 ownership 再 adopt，避免把无关改动洗白为 workflow-owned`);
+      }
+
+      const expectedFiles = [...scopedDirtyState.residueFiles].sort();
+      const providedFiles = [...new Set((files ?? []).map(file => file.trim()).filter(Boolean))].sort();
+      if (expectedFiles.length > 0) {
+        if (!providedFiles.length) {
+          throw new Error(`adopt 需要显式列出当前任务 ${id} 的残留文件：${expectedFiles.join(', ')}`);
+        }
+        if (expectedFiles.length !== providedFiles.length || expectedFiles.some((file, index) => file !== providedFiles[index])) {
+          throw new Error(`adopt --files 必须精确匹配当前任务 ${id} 的残留文件。期望：${expectedFiles.join(', ')}；实际：${providedFiles.join(', ') || '无'}`);
+        }
+      } else if (providedFiles.length > 0) {
+        throw new Error(`任务 ${id} 当前没有可接管的显式残留文件，不能通过 adopt --files 认领这些文件：${providedFiles.join(', ')}`);
+      }
+
       const remainingTaskIds = reconcile.taskIds.filter(taskId => taskId !== id);
       const baseData: ProgressData = {
         ...data,
         status: remainingTaskIds.length ? 'reconciling' : 'running',
         current: remainingTaskIds[0] ?? null,
       };
-      const message = await this.finalizeSuccessfulTask(baseData, task, detail, files);
+      const message = await this.finalizeSuccessfulTask(baseData, task, detail, providedFiles);
       if (remainingTaskIds.length) {
         await saveReconcileState(this.repo.projectRoot(), remainingTaskIds);
         return `${message}\n仍有 ${remainingTaskIds.length} 个中断任务待接管`;
@@ -670,7 +747,7 @@ export class WorkflowService {
         throw new Error(`任务 ${id} 不在待接管列表中`);
       }
 
-      const dirtyState = await this.getResumeDirtyState();
+      const dirtyState = await this.getScopedReconcileDirtyState(id, reconcile.taskIds);
       if (dirtyState.ambiguousFiles.length > 0) {
         throw new Error(`检测到 ${dirtyState.ambiguousFiles.length} 个归属未明变更：${dirtyState.ambiguousFiles.join(', ')}。这些文件可能包含用户手动修改/删除；FlowPilot 不会建议整文件 git restore。请先人工确认，属于任务产物则使用 node flow.js adopt ${id} --files ... 显式接管，否则保留这些改动并避免越界清理`);
       }
@@ -762,7 +839,6 @@ export class WorkflowService {
 
     const leftoverSetupOwnedFiles = comparison.newDirtyFiles.filter(
       file => setupOwnedSet.has(file)
-        && !NON_BLOCKING_SETUP_RESIDUE_FILES.has(file)
         && !(file === '.gitignore' && gitignorePolicyMatches),
     );
     if (leftoverSetupOwnedFiles.length > 0) {
@@ -839,77 +915,83 @@ export class WorkflowService {
 
   /** setup: 项目接管模式 - 写入 instruction file */
   async setup(client: SetupClient = 'other'): Promise<string> {
-    const existing = await this.repo.loadProgress();
-    const configBefore = await this.repo.loadConfig();
-    await this.repo.saveConfig({ ...configBefore, client });
-    const wrote = await this.repo.ensureClaudeMd(client);
-    const roleWrote = client === 'snow-cli' ? await this.repo.ensureRoleMd(client) : false;
-    if (client === 'claude') {
-      await this.repo.ensureHooks();
-    }
-    await this.repo.ensureLocalStateIgnored();
-    const lines: string[] = [];
-
-    if (existing && (existing.status === 'running' || existing.status === 'finishing')) {
-      const done = existing.tasks.filter(t => t.status === 'done').length;
-      const statusIcon = existing.status === 'finishing' ? '🏁' : '🔄';
-      lines.push('**═══ 检测到进行中的工作流 ═══**');
-      lines.push(`📂 ${existing.name}`);
-      lines.push(`📊 进度: ${done}/${existing.tasks.length}`);
-      lines.push('');
-      if (existing.status === 'finishing') {
-        lines.push('**═══ 当前状态 ═══**');
-        lines.push('📍 状态: 收尾阶段');
-        lines.push('👉 运行 `node flow.js finish` 继续');
-      } else {
-        lines.push('**═══ 当前状态 ═══**');
-        lines.push('⏸ 状态: ' + existing.status);
-        lines.push('👉 运行 `node flow.js resume` 继续');
+    return this.withRepoLock(async () => {
+      const existing = await this.repo.loadProgress();
+      const configBefore = await this.repo.loadConfig();
+      await this.repo.saveConfig({ ...configBefore, client });
+      const wrote = await this.repo.ensureClaudeMd(client);
+      const roleWrote = client === 'snow-cli' ? await this.repo.ensureRoleMd(client) : false;
+      if (client === 'claude') {
+        await this.repo.ensureHooks();
       }
-    } else {
-      lines.push('**═══ 项目状态 ═══**');
-      lines.push('✅ 项目已接管，工作流工具就绪');
-      lines.push('⏳ 等待需求输入（文档或对话描述）');
-      lines.push('');
-      lines.push('**═══ 下一步 ═══**');
-      lines.push('💡 描述你的开发任务即可启动全自动开发');
-    }
+      await this.repo.ensureLocalStateIgnored();
+      const lines: string[] = [];
 
-    lines.push('');
-    lines.push('**═══ 生成结果 ═══**');
-    if (wrote) {
-      const instructionPath = (await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? 'AGENTS.md';
-      lines.push(`✓ ${instructionPath} 已更新：添加了工作流协议`);
-    }
-    if (roleWrote) {
-      lines.push('✓ ROLE.md 已更新：与 AGENTS.md 保持一致');
-    }
-    if (client === 'claude') {
-      lines.push('✓ .claude/settings.json 已更新：添加了 Claude Code Hooks');
-    }
-    if (!lines.includes('描述你的开发任务即可启动全自动开发')) {
+      if (existing && ['running', 'reconciling', 'finishing'].includes(existing.status)) {
+        const done = existing.tasks.filter(t => t.status === 'done').length;
+        lines.push('**═══ 检测到进行中的工作流 ═══**');
+        lines.push(`📂 ${existing.name}`);
+        lines.push(`📊 进度: ${done}/${existing.tasks.length}`);
+        lines.push('');
+        lines.push('**═══ 当前状态 ═══**');
+        if (existing.status === 'finishing') {
+          lines.push('📍 状态: 收尾阶段');
+          lines.push('👉 运行 `node flow.js finish` 继续');
+        } else if (existing.status === 'reconciling') {
+          lines.push('⚠️ 状态: reconciling');
+          lines.push('👉 运行 `node flow.js resume` 查看待接管任务，再执行 `adopt / restart / skip`');
+        } else {
+          lines.push('⏸ 状态: running');
+          lines.push('👉 运行 `node flow.js resume` 继续');
+        }
+      } else {
+        lines.push('**═══ 项目状态 ═══**');
+        lines.push('✅ 项目已接管，工作流工具就绪');
+        lines.push('⏳ 等待需求输入（文档或对话描述）');
+        lines.push('');
+        lines.push('**═══ 下一步 ═══**');
+        lines.push('💡 描述你的开发任务即可启动全自动开发');
+      }
+
       lines.push('');
-      lines.push('**═══ 下一步 ═══**');
-      lines.push('💡 描述你的开发任务即可启动全自动开发');
-    }
-    return lines.join('\n');
+      lines.push('**═══ 生成结果 ═══**');
+      if (wrote) {
+        const instructionPath = (await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? 'AGENTS.md';
+        lines.push(`✓ ${instructionPath} 已更新：添加了工作流协议`);
+      }
+      if (roleWrote) {
+        lines.push('✓ ROLE.md 已更新：与 AGENTS.md 保持一致');
+      }
+      if (client === 'claude') {
+        lines.push('✓ .claude/settings.json 已更新：添加了 Claude Code Hooks');
+      }
+      if (!lines.includes('💡 描述你的开发任务即可启动全自动开发') && (!existing || !['reconciling', 'running', 'finishing'].includes(existing.status))) {
+        lines.push('');
+        lines.push('**═══ 下一步 ═══**');
+        lines.push('💡 描述你的开发任务即可启动全自动开发');
+      }
+      return lines.join('\n');
+    });
   }
 
   /** review: 标记已通过code-review，解锁finish */
   async review(): Promise<string> {
-    const data = await this.requireProgress();
-    if (!isAllDone(data.tasks)) throw new Error('还有未完成的任务，请先完成所有任务');
-    if (data.status === 'finishing') return '**═══ 代码审查 ═══**\n✓ 已处于 review 通过状态\n\n**═══ 下一步 ═══**\n👉 运行 `node flow.js finish` 完成收尾';
-    await this.repo.saveProgress({ ...data, status: 'finishing' });
-    return '**═══ 代码审查 ═══**\n✅ 代码审查已通过\n\n**═══ 下一步 ═══**\n👉 运行 `node flow.js finish` 完成收尾';
+    return this.withRepoLock(async () => {
+      const data = await this.requireProgress();
+      if (!isAllDone(data.tasks)) throw new Error('还有未完成的任务，请先完成所有任务');
+      if (data.status === 'finishing') return '**═══ 代码审查 ═══**\n✓ 已处于 review 通过状态\n\n**═══ 下一步 ═══**\n👉 运行 `node flow.js finish` 完成收尾';
+      await this.repo.saveProgress({ ...data, status: 'finishing' });
+      return '**═══ 代码审查 ═══**\n✅ 代码审查已通过\n\n**═══ 下一步 ═══**\n👉 运行 `node flow.js finish` 完成收尾';
+    });
   }
 
   /** finish: 智能收尾 - 先verify，review后置 */
   async finish(): Promise<string> {
-    const data = await this.requireProgress();
-    log.debug(`finish: status=${data.status}`);
-    if (data.status === 'idle' || data.status === 'completed') return '工作流已完成，无需重复finish';
-    if (!isAllDone(data.tasks)) throw new Error('还有未完成的任务，请先完成所有任务');
+    return this.withRepoLock(async () => {
+      const data = await this.requireProgress();
+      log.debug(`finish: status=${data.status}`);
+      if (data.status === 'idle' || data.status === 'completed') return '工作流已完成，无需重复finish';
+      if (!isAllDone(data.tasks)) throw new Error('还有未完成的任务，请先完成所有任务');
 
     // 停止心跳
     this.stopHeartbeat?.();
@@ -1059,9 +1141,10 @@ export class WorkflowService {
       finalSummary,
       this.formatCommitMessage(commitResult, 'finish'),
       '',
-      '**═══ 下一步 ═══**',
-      '⚠️ ' + nextStep,
-    ].join('\n');
+        '**═══ 下一步 ═══**',
+        '⚠️ ' + nextStep,
+      ].join('\n');
+    });
   }
 
   /** 计算 config 变更的键列表（浅比较，键名排序） */
@@ -1090,7 +1173,7 @@ export class WorkflowService {
   }
 
   /** 格式化验证结果，让 passed/skipped/not-found 对用户可见 */
-  private formatVerifySummary(result: { status?: string; steps?: Array<{ command: string; status: string; reason?: string }>; scripts: string[] }): string {
+  private formatVerifySummary(result: VerifyResult): string {
     if (result.status === 'not-found') {
       return '验证结果: 未发现可执行的验证命令';
     }
@@ -1133,6 +1216,13 @@ export class WorkflowService {
     await this.repo.lock();
     try {
       const data = await this.requireProgress();
+      if (data.status === 'reconciling') {
+        throw new Error('当前工作流处于 reconciling 状态，需先处理待接管任务后再 rollback');
+      }
+      const activeTasks = data.tasks.filter(taskEntry => taskEntry.status === 'active');
+      if (activeTasks.length > 0) {
+        throw new Error(`仍有 active 任务在运行：${activeTasks.map(taskEntry => taskEntry.id).join(', ')}，请先完成或恢复后再 rollback`);
+      }
       const task = data.tasks.find(t => t.id === id);
       if (!task) throw new Error(`任务 ${id} 不存在`);
       if (task.status !== 'done') throw new Error(`任务 ${id} 状态为 ${task.status}，只能回滚已完成的任务`);
@@ -1143,12 +1233,17 @@ export class WorkflowService {
       // 将回滚目标及其传递下游任务重置为 pending，并重建滚动摘要
       const newTasks = reopenRollbackBranch(data.tasks, id);
       const newData = { ...data, status: 'running' as const, current: null, tasks: newTasks };
+      const resetTaskIds = newTasks
+        .filter((taskEntry, index) => taskEntry.status === 'pending' && data.tasks[index].status !== 'pending')
+        .map(taskEntry => taskEntry.id);
+      for (const taskId of resetTaskIds) {
+        await replaceOwnedFilesForTask(this.repo.projectRoot(), taskId, []);
+        await this.repo.clearTaskPulse(taskId);
+      }
+      await clearReconcileState(this.repo.projectRoot());
       await this.repo.saveProgress(newData);
       await this.updateSummary(newData);
-      const resetCount = newTasks.filter((taskEntry, index) =>
-        taskEntry.status === 'pending' && data.tasks[index].status !== 'pending'
-      ).length;
-      return `已回滚到任务 ${id} 之前的状态，${resetCount} 个任务重置为 pending`;
+      return `已回滚到任务 ${id} 之前的状态，${resetTaskIds.length} 个任务重置为 pending`;
     } finally {
       await this.repo.unlock();
     }
@@ -1156,28 +1251,32 @@ export class WorkflowService {
 
   /** abort: 中止工作流，清理 .workflow/ 目录 */
   async abort(): Promise<string> {
-    const data = await this.repo.loadProgress();
-    if (!data) return '无活跃工作流，无需中止';
-    await this.repo.saveProgress({ ...data, status: 'aborted' });
-    await this.repo.cleanupInjections();
-    await this.repo.clearAll();
-    return `工作流 "${data.name}" 已中止，.workflow/ 已清理`;
+    return this.withRepoLock(async () => {
+      const data = await this.repo.loadProgress();
+      if (!data) return '无活跃工作流，无需中止';
+      await this.repo.saveProgress({ ...data, status: 'aborted' });
+      await this.repo.cleanupInjections();
+      await this.repo.clearAll();
+      return `工作流 "${data.name}" 已中止，.workflow/ 已清理`;
+    });
   }
 
   /** rollbackEvolution: 从进化日志恢复历史 config */
   async rollbackEvolution(index: number): Promise<string> {
-    const evolutions = await this.repo.loadEvolutions();
-    if (!evolutions.length) return '无进化日志';
-    if (index < 0 || index >= evolutions.length) return `索引越界，有效范围: 0-${evolutions.length - 1}`;
-    const target = evolutions[index];
-    const configBefore = await this.repo.loadConfig();
-    await this.repo.saveConfig(target.configBefore);
-    await this.repo.saveEvolution({
-      timestamp: new Date().toISOString(),
-      workflowName: `rollback-to-${index}`,
-      configBefore, configAfter: target.configBefore, suggestions: ['手动回滚'],
+    return this.withRepoLock(async () => {
+      const evolutions = await this.repo.loadEvolutions();
+      if (!evolutions.length) return '无进化日志';
+      if (index < 0 || index >= evolutions.length) return `索引越界，有效范围: 0-${evolutions.length - 1}`;
+      const target = evolutions[index];
+      const configBefore = await this.repo.loadConfig();
+      await this.repo.saveConfig(target.configBefore);
+      await this.repo.saveEvolution({
+        timestamp: new Date().toISOString(),
+        workflowName: `rollback-to-${index}`,
+        configBefore, configAfter: target.configBefore, suggestions: ['手动回滚'],
+      });
+      return `已回滚到进化点 ${index}（${target.timestamp}）`;
     });
-    return `已回滚到进化点 ${index}（${target.timestamp}）`;
   }
 
   /** recall: 查询相关记忆 */

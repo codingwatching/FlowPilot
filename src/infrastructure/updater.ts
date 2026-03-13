@@ -22,17 +22,23 @@ function getCachePath(): string {
   return join(process.cwd(), '.flowpilot', 'update-cache.json');
 }
 
-function getCurrentVersion(): string {
+function extractVersionFromSource(content: string): string | null {
+  const match = content.match(/\/\/ FLOWPILOT_VERSION:\s*(\d+\.\d+\.\d+)/);
+  return match?.[1] ?? null;
+}
+
+function resolveExecutablePath(explicitPath?: string): string | null {
+  const candidate = explicitPath ?? process.argv[1];
+  if (candidate && existsSync(candidate)) return candidate;
+  return null;
+}
+
+export function getCurrentVersion(executablePath?: string): string {
   try {
-    const cwd = process.cwd();
-    const flowPath = existsSync(join(cwd, 'flow.js')) 
-      ? join(cwd, 'flow.js') 
-      : join(cwd, 'dist', 'flow.js');
-    if (existsSync(flowPath)) {
-      const content = readFileSync(flowPath, 'utf-8');
-      const match = content.match(/\/\/ FLOWPILOT_VERSION:\s*(\d+\.\d+\.\d+)/);
-      if (match) return match[1];
-    }
+    const flowPath = resolveExecutablePath(executablePath);
+    if (!flowPath) return '0.0.0';
+    const content = readFileSync(flowPath, 'utf-8');
+    return extractVersionFromSource(content) ?? '0.0.0';
   } catch {}
   return '0.0.0';
 }
@@ -88,8 +94,8 @@ function saveCache(cache: UpdateCache): void {
  * 检查更新并返回提示信息
  * @returns 有新版本返回提示字符串，无更新或检查失败返回 null
  */
-export function checkForUpdate(): string | null {
-  const currentVersion = getCurrentVersion();
+export function checkForUpdate(executablePath?: string): string | null {
+  const currentVersion = getCurrentVersion(executablePath);
   if (currentVersion === '0.0.0') return null;
 
   const cache = loadCache();
@@ -98,7 +104,7 @@ export function checkForUpdate(): string | null {
   // 缓存有效期内，直接返回缓存结果
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
     if (compareVersions(currentVersion, cache.latestVersion)) {
-      return '🔄 发现新版本: v' + cache.latestVersion + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   项目根目录运行: curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
+      return '💡 发现新版本 v' + cache.latestVersion + ' (当前 v' + currentVersion + ')，运行: curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
     }
     return null;
   }
@@ -118,7 +124,7 @@ export function checkForUpdate(): string | null {
   saveCache(newCache);
 
   if (hasUpdate) {
-    return '🔄 发现新版本: v' + latestInfo.version + ' (当前: v' + currentVersion + ')\n   下载: ' + RELEASE_URL + '\n   项目根目录运行: curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
+    return '💡 发现新版本 v' + latestInfo.version + ' (当前 v' + currentVersion + ')，运行: curl -L ' + RELEASE_URL + '/latest/download/flow.js -o flow.js';
   }
   
   return null;

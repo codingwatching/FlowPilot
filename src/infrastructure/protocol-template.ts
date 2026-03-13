@@ -231,15 +231,9 @@ echo '摘要 [REMEMBER] 关键发现 [DECISION] 技术决策' | node flow.js che
 1. Run \`node flow.js finish\` — runs verify (build/test/lint). If fail → dispatch sub-agent to fix → retry finish.
 2. When finish output contains "验证通过" → dispatch a sub-agent to run /code-review:code-review. Fix issues if any.
 3. Run \`node flow.js review\` to mark code-review done.
-4. **AI 反思（进化引擎，可选）**: 询问用户："本轮工作流已完成，是否针对本项目进行反思迭代进化？（会消耗额外 token）" 用户同意后才执行。Sub-agent MUST:
-   - **MUST invoke /superpowers:brainstorming FIRST** — 反思对象是**工作流执行过程本身**（任务成功率、重试模式、并行效率、协议瓶颈），NOT 目标项目的代码或架构。
-   - Read \`.flowpilot/history/\` files to understand workflow stats
-   - Read \`.flowpilot/evolution/\` files to see past experiments
-   - Analyze: what went well, what could improve, config optimization opportunities
-   - Pipe structured findings into: \`echo '[CONFIG] 将 maxRetries 提升至 5\\n[PROTOCOL] 子Agent应先验证环境再编码' | node flow.js evolve\`
-   - Tags: \`[CONFIG]\` for config changes, \`[PROTOCOL]\` for instruction-file protocol changes
-5. Run \`node flow.js finish\` again — verify passes + review done → final commit → idle.
-**Loop: finish(verify) → review(code-review) → evolve(AI反思) → fix → finish again. All gates must pass.**
+4. Run \`node flow.js finish\` again — verify passes + review done → final commit. Only when最终 commit 真正成功时，工作流才会 cleanup 并回到 idle。
+5. Successful final \`finish\` will automatically run reflect + experiment based on workflow stats. If final commit is skipped / degraded / rejected, do not treat the workflow as complete.
+**Loop: finish(verify) → review(code-review) → finish(final commit + auto reflect/experiment) → fix → finish again. All gates must pass.**
 `;
 
 /** 内置协议模板（内联，无需运行时读文件） */

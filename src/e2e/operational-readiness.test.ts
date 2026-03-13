@@ -4,7 +4,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { access, mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -169,16 +169,19 @@ describe('operational readiness smoke tests', () => {
 
     expect(() => runFlow(repoDir, ['next'])).toThrow(/adopt|restart|skip/);
 
-    const adoptOutput = runFlow(
+    expect(() => runFlow(
       repoDir,
       ['adopt', '001', '--files', 'residue.txt'],
       '[REMEMBER] adopted interrupted residue',
-    );
-    expect(adoptOutput).toContain('任务 001 完成');
+    )).toThrow(/归属未明/);
+
+    await unlink(join(repoDir, 'residue.txt'));
+    const restartOutput = runFlow(repoDir, ['restart', '001']);
+    expect(restartOutput).toContain('任务 001 已确认从头重做');
 
     const statusOutput = runFlow(repoDir, ['status']);
     expect(statusOutput).toContain('Clean Repo Smoke · running');
-    expect(statusOutput).toContain('✓ 001 [backend] add tracked file');
+    expect(statusOutput).toContain('○ 001 [backend] add tracked file');
 
     const gitStatus = runGit(repoDir, ['status', '--short']);
     expect(gitStatus).toContain('M baseline.txt');

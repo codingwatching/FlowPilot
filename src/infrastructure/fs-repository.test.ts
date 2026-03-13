@@ -223,7 +223,7 @@ describe('FsWorkflowRepository', () => {
     expect(content).not.toContain('flowpilot:start');
   });
 
-  it('cleanupInjections 在注入块被编辑后保持 AGENTS.md 不变', async () => {
+  it('cleanupInjections 在注入块被编辑后仍按 marker 移除 AGENTS.md 协议块', async () => {
     await writeFile(join(dir, 'AGENTS.md'), '# Custom\n\n', 'utf-8');
     await repo.ensureClaudeMd();
     const path = join(dir, 'AGENTS.md');
@@ -234,8 +234,8 @@ describe('FsWorkflowRepository', () => {
 
     await repo.cleanupInjections();
 
-    expect(await readFile(path, 'utf-8')).toBe(edited);
-    expect(await readFile(path, 'utf-8')).toContain('flowpilot:start');
+    expect(await readFile(path, 'utf-8')).toBe('# Custom\n');
+    expect(await readFile(path, 'utf-8')).not.toContain('flowpilot:start');
   });
 
   it('cleanupInjections 在缺少 hook manifest 时保留现有 settings.json', async () => {
@@ -392,8 +392,10 @@ describe('FsWorkflowRepository', () => {
     expect(wrote).toBe(true);
     expect(existsSync(join(dir, '.claude', 'settings.json'))).toBe(true);
     const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
-    expect(settings.hooks.PreToolUse).toHaveLength(3);
+    expect(settings.hooks.PreToolUse).toHaveLength(9);
     expect(settings.hooks.PreToolUse[0].matcher).toBe('TaskCreate');
+    expect(settings.hooks.PreToolUse.map((entry: { matcher: string }) => entry.matcher)).toContain('Read');
+    expect(settings.hooks.PreToolUse.map((entry: { matcher: string }) => entry.matcher)).toContain('Edit');
   });
 
   it('ensureHooks 幂等追加 hooks', async () => {
@@ -401,7 +403,7 @@ describe('FsWorkflowRepository', () => {
     const wrote = await repo.ensureHooks();
     expect(wrote).toBe(false);
     const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
-    expect(settings.hooks.PreToolUse).toHaveLength(3);
+    expect(settings.hooks.PreToolUse).toHaveLength(9);
   });
 
   it('ensureHooks 保留已有配置并仅补齐缺失 hooks', async () => {
@@ -422,7 +424,7 @@ describe('FsWorkflowRepository', () => {
     const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
     const preToolUse = settings.hooks.PreToolUse as Array<{ matcher: string }>;
     expect(settings.model).toBe('opus');
-    expect(preToolUse.map(entry => entry.matcher)).toEqual(['TaskCreate', 'OtherTool', 'TaskUpdate', 'TaskList']);
+    expect(preToolUse.map(entry => entry.matcher)).toEqual(['TaskCreate', 'OtherTool', 'TaskUpdate', 'TaskList', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Explore']);
     expect(preToolUse.filter(entry => entry.matcher === 'TaskCreate')).toHaveLength(1);
   });
 
@@ -444,7 +446,7 @@ describe('FsWorkflowRepository', () => {
     const settings = JSON.parse(await readFile(join(dir, '.claude', 'settings.json'), 'utf-8'));
     const preToolUse = settings.hooks.PreToolUse as Array<{ matcher: string }>;
     expect(settings.model).toBe('opus');
-    expect(preToolUse.map(entry => entry.matcher)).toEqual(['OtherTool', 'TaskCreate', 'TaskUpdate', 'TaskList']);
+    expect(preToolUse.map(entry => entry.matcher)).toEqual(['OtherTool', 'TaskCreate', 'TaskUpdate', 'TaskList', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Explore']);
   });
 
   it('ensureHooks records the earliest exact settings baseline and cleanup compares against it', async () => {

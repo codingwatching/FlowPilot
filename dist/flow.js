@@ -235,6 +235,17 @@ function runVerify(cwd) {
   if (!cmds.length) return { passed: true, status: "not-found", scripts: [], steps: [] };
   const steps = [];
   for (const cmd of cmds) {
+    const vitestProjectDir = resolveVitestProjectDir(cwd, cmd);
+    if (vitestProjectDir && !hasVitestTestFiles(vitestProjectDir)) {
+      steps.push({ command: cmd, status: "skipped", reason: "\u672A\u627E\u5230\u6D4B\u8BD5\u6587\u4EF6" });
+      continue;
+    }
+    const npmPreflight = preflightNpmCommand(cwd, cmd);
+    if (npmPreflight) {
+      steps.push({ command: cmd, status: "failed", reason: npmPreflight });
+      return { passed: false, status: "failed", scripts: cmds, steps, error: `${cmd} \u5931\u8D25:
+${npmPreflight}` };
+    }
     try {
       (0, import_node_child_process2.execSync)(cmd, { cwd, stdio: "pipe", timeout });
       steps.push({ command: cmd, status: "passed" });
@@ -269,6 +280,84 @@ function normalizeCommands(cwd, commands) {
     const nestedTestScript = loadPackageScripts((0, import_node_path2.join)(cwd, nested.dir)).test;
     return shouldForceVitestRun("npm run test", nestedTestScript) ? `cd ${nested.dir} && npm run test -- --run` : command;
   });
+}
+function resolveVitestProjectDir(cwd, command) {
+  if (command === "npm run test -- --run") return cwd;
+  const nested = /^cd\s+(.+?)\s+&&\s+npm run test -- --run$/.exec(command.trim());
+  return nested ? (0, import_node_path2.join)(cwd, nested[1]) : null;
+}
+function hasVitestTestFiles(dir) {
+  const stack = [dir];
+  const skippedDirs = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", "build", "coverage", ".workflow", ".flowpilot"]);
+  const testFilePattern = /\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = (0, import_node_fs2.readdirSync)(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (skippedDirs.has(entry.name)) continue;
+        if (entry.name === "__tests__") return true;
+        stack.push((0, import_node_path2.join)(current, entry.name));
+        continue;
+      }
+      if (testFilePattern.test(entry.name)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function resolveNpmCommandTarget(cwd, command) {
+  const trimmed = command.trim();
+  if (trimmed === "npm test") return { cwd, scriptName: "test" };
+  let match = /^npm run ([A-Za-z0-9:_-]+)(?:\s+--.*)?$/.exec(trimmed);
+  if (match) return { cwd, scriptName: match[1] };
+  match = /^cd\s+(.+?)\s+&&\s+npm run ([A-Za-z0-9:_-]+)(?:\s+--.*)?$/.exec(trimmed);
+  if (match) return { cwd: (0, import_node_path2.join)(cwd, match[1]), scriptName: match[2] };
+  match = /^cd\s+(.+?)\s+&&\s+npm test$/.exec(trimmed);
+  if (match) return { cwd: (0, import_node_path2.join)(cwd, match[1]), scriptName: "test" };
+  return null;
+}
+function extractPrimaryExecutable(script) {
+  const trimmed = script.trim();
+  if (!trimmed) return null;
+  const first = trimmed.split(/\s+/)[0];
+  if (!first || first.includes("/") || first.includes("\\")) return null;
+  if (first.startsWith("$") || first.includes("=")) return null;
+  return first;
+}
+function binaryExists(command, cwd) {
+  const localBin = (0, import_node_path2.join)(cwd, "node_modules", ".bin", command);
+  if ((0, import_node_fs2.existsSync)(localBin)) return true;
+  try {
+    (0, import_node_child_process2.execSync)(`command -v ${command}`, { cwd, stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function preflightNpmCommand(cwd, command) {
+  const target = resolveNpmCommandTarget(cwd, command);
+  if (!target) return null;
+  const pkgPath = (0, import_node_path2.join)(target.cwd, "package.json");
+  if (!(0, import_node_fs2.existsSync)(pkgPath)) {
+    return "package.json \u4E0D\u5B58\u5728";
+  }
+  const scripts = loadPackageScripts(target.cwd);
+  const script = scripts[target.scriptName];
+  if (!script) {
+    return `package.json \u4E2D\u672A\u5B9A\u4E49 ${target.scriptName} script`;
+  }
+  const executable = extractPrimaryExecutable(script);
+  if (!executable) return null;
+  if (["npm", "npx", "pnpm", "yarn", "node", "bash", "sh"].includes(executable)) return null;
+  if (binaryExists(executable, target.cwd)) return null;
+  return `\u672A\u627E\u5230\u53EF\u6267\u884C\u547D\u4EE4: ${executable}`;
 }
 function loadPackageScripts(cwd) {
   try {
@@ -591,15 +680,9 @@ echo '\u6458\u8981 [REMEMBER] \u5173\u952E\u53D1\u73B0 [DECISION] \u6280\u672F\u
 1. Run \`node flow.js finish\` \u2014 runs verify (build/test/lint). If fail \u2192 dispatch sub-agent to fix \u2192 retry finish.
 2. When finish output contains "\u9A8C\u8BC1\u901A\u8FC7" \u2192 dispatch a sub-agent to run /code-review:code-review. Fix issues if any.
 3. Run \`node flow.js review\` to mark code-review done.
-4. **AI \u53CD\u601D\uFF08\u8FDB\u5316\u5F15\u64CE\uFF0C\u53EF\u9009\uFF09**: \u8BE2\u95EE\u7528\u6237\uFF1A"\u672C\u8F6E\u5DE5\u4F5C\u6D41\u5DF2\u5B8C\u6210\uFF0C\u662F\u5426\u9488\u5BF9\u672C\u9879\u76EE\u8FDB\u884C\u53CD\u601D\u8FED\u4EE3\u8FDB\u5316\uFF1F\uFF08\u4F1A\u6D88\u8017\u989D\u5916 token\uFF09" \u7528\u6237\u540C\u610F\u540E\u624D\u6267\u884C\u3002Sub-agent MUST:
-   - **MUST invoke /superpowers:brainstorming FIRST** \u2014 \u53CD\u601D\u5BF9\u8C61\u662F**\u5DE5\u4F5C\u6D41\u6267\u884C\u8FC7\u7A0B\u672C\u8EAB**\uFF08\u4EFB\u52A1\u6210\u529F\u7387\u3001\u91CD\u8BD5\u6A21\u5F0F\u3001\u5E76\u884C\u6548\u7387\u3001\u534F\u8BAE\u74F6\u9888\uFF09\uFF0CNOT \u76EE\u6807\u9879\u76EE\u7684\u4EE3\u7801\u6216\u67B6\u6784\u3002
-   - Read \`.flowpilot/history/\` files to understand workflow stats
-   - Read \`.flowpilot/evolution/\` files to see past experiments
-   - Analyze: what went well, what could improve, config optimization opportunities
-   - Pipe structured findings into: \`echo '[CONFIG] \u5C06 maxRetries \u63D0\u5347\u81F3 5\\n[PROTOCOL] \u5B50Agent\u5E94\u5148\u9A8C\u8BC1\u73AF\u5883\u518D\u7F16\u7801' | node flow.js evolve\`
-   - Tags: \`[CONFIG]\` for config changes, \`[PROTOCOL]\` for instruction-file protocol changes
-5. Run \`node flow.js finish\` again \u2014 verify passes + review done \u2192 final commit \u2192 idle.
-**Loop: finish(verify) \u2192 review(code-review) \u2192 evolve(AI\u53CD\u601D) \u2192 fix \u2192 finish again. All gates must pass.**
+4. Run \`node flow.js finish\` again \u2014 verify passes + review done \u2192 final commit. Only when\u6700\u7EC8 commit \u771F\u6B63\u6210\u529F\u65F6\uFF0C\u5DE5\u4F5C\u6D41\u624D\u4F1A cleanup \u5E76\u56DE\u5230 idle\u3002
+5. Successful final \`finish\` will automatically run reflect + experiment based on workflow stats. If final commit is skipped / degraded / rejected, do not treat the workflow as complete.
+**Loop: finish(verify) \u2192 review(code-review) \u2192 finish(final commit + auto reflect/experiment) \u2192 fix \u2192 finish again. All gates must pass.**
 `;
 function getProtocolTemplate(client = "other") {
   const codexBlock = client === "codex" ? `${CODEX_ENHANCED_GUIDELINES}
@@ -647,7 +730,9 @@ function isRuntimeMetadataPath(file) {
   return RUNTIME_FILES.has(file) || RUNTIME_PATH_PREFIXES.some((prefix) => file === prefix.slice(0, -1) || file.startsWith(prefix));
 }
 function isActivationMetadata(value) {
-  return isRecord(value) && typeof value.time === "number" && Number.isFinite(value.time) && Number.isInteger(value.pid) && value.pid > 0;
+  const pid = isRecord(value) ? value.pid : void 0;
+  const time = isRecord(value) ? value.time : void 0;
+  return isRecord(value) && typeof time === "number" && Number.isFinite(time) && typeof pid === "number" && Number.isInteger(pid) && pid > 0;
 }
 function normalizeDirtyFiles(files) {
   const seen = /* @__PURE__ */ new Set();
@@ -797,12 +882,14 @@ function classifyResumeDirtyFiles(currentFiles, baselineFiles, setupOwnedFiles, 
   const comparison = compareDirtyFilesAgainstBaseline(currentFiles, baselineFiles ?? []);
   const setupOwnedSet = new Set(normalizeDirtyFiles(setupOwnedFiles));
   const taskOwnedSet = new Set(normalizeDirtyFiles(taskOwnedFiles));
-  const candidateFiles = (baselineFiles ? comparison.newDirtyFiles : comparison.currentFiles).filter((file) => !setupOwnedSet.has(file));
+  const candidateFiles = baselineFiles ? comparison.newDirtyFiles : comparison.currentFiles;
+  const workflowCandidateFiles = candidateFiles.filter((file) => !setupOwnedSet.has(file));
   return {
     currentFiles: comparison.currentFiles.filter((file) => !setupOwnedSet.has(file)),
     preservedBaselineFiles: comparison.preservedBaselineFiles.filter((file) => !setupOwnedSet.has(file)),
-    taskOwnedResidueFiles: candidateFiles.filter((file) => taskOwnedSet.has(file)),
-    ambiguousFiles: candidateFiles.filter((file) => !taskOwnedSet.has(file))
+    taskOwnedResidueFiles: workflowCandidateFiles.filter((file) => taskOwnedSet.has(file)),
+    ambiguousFiles: workflowCandidateFiles.filter((file) => !taskOwnedSet.has(file)),
+    setupOwnedResidueFiles: candidateFiles.filter((file) => setupOwnedSet.has(file))
   };
 }
 function getRuntimeLocalityToken() {
@@ -833,7 +920,7 @@ function parseRuntimeLock(raw) {
     const hostname2 = parsed.hostname;
     const createdAt = parsed.createdAt;
     const localityToken = parsed.localityToken;
-    if (!Number.isInteger(pid) || pid <= 0 || typeof hostname2 !== "string" || hostname2.length === 0 || !isValidCreatedAt(createdAt) || localityToken !== void 0 && (typeof localityToken !== "string" || localityToken.length === 0)) {
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || typeof hostname2 !== "string" || hostname2.length === 0 || !isValidCreatedAt(createdAt) || localityToken !== void 0 && (typeof localityToken !== "string" || localityToken.length === 0)) {
       return { valid: false, reason: "invalid-shape" };
     }
     return {
@@ -1081,7 +1168,7 @@ async function saveReconcileState(basePath2, taskIds) {
 }
 async function clearReconcileState(basePath2) {
   try {
-    await (0, import_fs.unlink)(runtimePath(basePath2, RECONCILE_STATE_FILE));
+    await (0, import_promises.unlink)(runtimePath(basePath2, RECONCILE_STATE_FILE));
   } catch {
   }
 }
@@ -1124,6 +1211,13 @@ function collectOwnedFiles(state) {
   const allFiles = Object.values(state.byTask).flatMap((files) => files);
   return normalizeDirtyFiles(allFiles);
 }
+function collectOwnedFilesForTasks(state, taskIds) {
+  const files = taskIds.flatMap((taskId) => state.byTask[taskId] ?? []);
+  return normalizeDirtyFiles(files);
+}
+async function replaceOwnedFilesForTask(basePath2, taskId, files) {
+  return recordOwnedFiles(basePath2, taskId, files);
+}
 function defaultInvalidLockStaleAfterMs() {
   return DEFAULT_INVALID_LOCK_STALE_AFTER_MS;
 }
@@ -1135,6 +1229,9 @@ var CONFIG_FILE = "config.json";
 var PRIMARY_INSTRUCTION_FILE = "AGENTS.md";
 var LEGACY_INSTRUCTION_FILE = "CLAUDE.md";
 var ROLE_INSTRUCTION_FILE = "ROLE.md";
+var FLOWPILOT_MARKER_START = "<!-- flowpilot:start -->";
+var FLOWPILOT_MARKER_END = "<!-- flowpilot:end -->";
+var BLOCKED_NATIVE_TOOLS = ["TaskCreate", "TaskUpdate", "TaskList", "Read", "Write", "Edit", "Glob", "Grep", "Explore"];
 var VALID_WORKFLOW_STATUS = /* @__PURE__ */ new Set(["idle", "running", "reconciling", "finishing", "completed", "aborted"]);
 var VALID_TASK_STATUS = /* @__PURE__ */ new Set(["pending", "active", "done", "skipped", "failed"]);
 function parseProgressMarkdown(raw) {
@@ -1234,14 +1331,15 @@ function normalizeCleanupContent(content) {
   }
   return content.replace(/^\n+/, "").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
-function cleanupClaudeContent(content, manifest) {
-  const claude = manifest.claudeMd;
-  if (!claude || claude.block.length === 0 || !content.includes(claude.block)) {
+function cleanupClaudeContent(content, injectionState) {
+  const startIdx = content.indexOf(FLOWPILOT_MARKER_START);
+  const endIdx = content.indexOf(FLOWPILOT_MARKER_END);
+  if (startIdx < 0 || endIdx < 0 || endIdx < startIdx) {
     return { effect: "noop" };
   }
-  let next = content.replace(claude.block, "");
-  if (claude.created && claude.scaffold && next.startsWith(claude.scaffold)) {
-    next = next.slice(claude.scaffold.length);
+  let next = `${content.slice(0, startIdx)}${content.slice(endIdx + FLOWPILOT_MARKER_END.length)}`;
+  if (injectionState?.created && injectionState.scaffold && next.startsWith(injectionState.scaffold)) {
+    next = next.slice(injectionState.scaffold.length);
   }
   const normalized = normalizeCleanupContent(next);
   if (normalized.length === 0) {
@@ -1632,7 +1730,7 @@ var FsWorkflowRepository = class {
     if (!settingsBaseline.exists) {
       created = true;
     }
-    const requiredPreToolUse = [hookEntry("TaskCreate"), hookEntry("TaskUpdate"), hookEntry("TaskList")];
+    const requiredPreToolUse = BLOCKED_NATIVE_TOOLS.map(hookEntry);
     const currentHooks = settings.hooks;
     const hooks = currentHooks && typeof currentHooks === "object" && !Array.isArray(currentHooks) ? currentHooks : {};
     const currentPreToolUse = hooks.PreToolUse;
@@ -1750,14 +1848,21 @@ var FsWorkflowRepository = class {
   /** 清理注入的 instruction file 协议块、hooks 和 .gitignore 规则，仅移除 FlowPilot-owned 内容 */
   async cleanupInjections() {
     const manifest = await loadSetupInjectionManifest(this.base);
-    for (const mdRelPath of [manifest.claudeMd?.path ?? LEGACY_INSTRUCTION_FILE, manifest.roleMd?.path].filter(Boolean)) {
+    const instructionPaths = [...new Set([
+      PRIMARY_INSTRUCTION_FILE,
+      LEGACY_INSTRUCTION_FILE,
+      ROLE_INSTRUCTION_FILE,
+      manifest.claudeMd?.path,
+      manifest.roleMd?.path
+    ].filter(Boolean))];
+    for (const mdRelPath of instructionPaths) {
       const mdPath = (0, import_path2.join)(this.base, mdRelPath);
       try {
         const content = await (0, import_promises2.readFile)(mdPath, "utf-8");
-        const cleaned = cleanupClaudeContent(content, {
-          ...manifest,
-          claudeMd: mdRelPath === manifest.roleMd?.path ? manifest.roleMd : manifest.claudeMd
-        });
+        const cleaned = cleanupClaudeContent(
+          content,
+          mdRelPath === manifest.roleMd?.path ? manifest.roleMd : manifest.claudeMd
+        );
         if (cleaned.effect === "delete") {
           await (0, import_promises2.unlink)(mdPath);
         } else if (cleaned.effect === "write") {
@@ -4032,6 +4137,7 @@ function formatTaskLine(task) {
 function formatStatus(data) {
   const activeTasks = data.tasks.filter((task) => task.status === "active");
   const blockedTasks = data.tasks.filter((task) => readLiveValue(task, ["stage", "phase", "liveStage"]) === "blocked");
+  const reconcilingTasks = data.status === "reconciling" ? data.tasks.filter((task) => task.status === "pending").map((task) => task.id) : [];
   const statusEmoji = data.status === "running" ? "\u{1F504}" : data.status === "finishing" ? "\u{1F3C1}" : "\u23F8";
   const lines = [
     `**\u2550\u2550\u2550 \u5DE5\u4F5C\u6D41\u72B6\u6001 \u2550\u2550\u2550**`,
@@ -4042,9 +4148,10 @@ function formatStatus(data) {
     ...data.tasks.flatMap((task) => formatTaskLine(task))
   ];
   const nextSteps = [
+    reconcilingTasks.length ? `\u26A0\uFE0F \u5F53\u524D\u5904\u4E8E reconciling\uFF0C\u8BF7\u5148\u5904\u7406\u5F85\u63A5\u7BA1\u4EFB\u52A1 (${reconcilingTasks.join(", ")})\uFF0C\u4F7F\u7528 \`node flow.js adopt <id> --files ...\`\u3001\`restart <id>\` \u6216 \`skip <id>\`` : "",
     activeTasks.length ? `\u23F3 \u7EE7\u7EED\u8DDF\u8FDB\u8FDB\u884C\u4E2D\u7684\u4EFB\u52A1 (${activeTasks.map((task) => task.id).join(", ")})` : "",
     blockedTasks.length ? `\u26A0\uFE0F \u4F18\u5148\u5904\u7406\u963B\u585E\u4EFB\u52A1 (${blockedTasks.map((task) => task.id).join(", ")})` : "",
-    !activeTasks.length && !blockedTasks.length && data.tasks.some((task) => task.status === "pending") ? "\u{1F4A1} \u8FD0\u884C `node flow.js next` \u83B7\u53D6\u4E0B\u4E00\u6279\u4EFB\u52A1" : ""
+    data.status !== "reconciling" && !activeTasks.length && !blockedTasks.length && data.tasks.some((task) => task.status === "pending") ? "\u{1F4A1} \u8FD0\u884C `node flow.js next` \u83B7\u53D6\u4E0B\u4E00\u6279\u4EFB\u52A1" : ""
   ].filter(Boolean);
   if (nextSteps.length) {
     lines.push("", "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**", ...nextSteps.map((step) => `- ${step}`));
@@ -4121,7 +4228,6 @@ function isExplicitFailureCheckpoint(detail) {
   return CHECKPOINT_FAILURE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 var CANONICAL_SETUP_NON_COMMITTABLE_FILES = ["AGENTS.md", "CLAUDE.md", ".gitignore"];
-var NON_BLOCKING_SETUP_RESIDUE_FILES = /* @__PURE__ */ new Set(["AGENTS.md", "CLAUDE.md", "ROLE.md"]);
 var WorkflowService = class {
   constructor(repo2, parse) {
     this.repo = repo2;
@@ -4162,6 +4268,41 @@ var WorkflowService = class {
     const client = config.client;
     return client === "claude" || client === "codex" || client === "cursor" || client === "snow-cli" || client === "other" ? client : "other";
   }
+  async withRepoLock(fn) {
+    await this.repo.lock();
+    try {
+      return await fn();
+    } finally {
+      await this.repo.unlock();
+    }
+  }
+  async getScopedReconcileDirtyState(taskId, reconcileTaskIds) {
+    const currentDirtyFiles = this.repo.listChangedFiles();
+    const baseline = await loadDirtyBaseline(this.repo.projectRoot());
+    const setupOwnedSet = await this.loadSetupOwnedSet();
+    const ownedState = await loadOwnedFiles(this.repo.projectRoot());
+    const scopedReconcileTaskIds = reconcileTaskIds ?? (await loadReconcileState(this.repo.projectRoot())).taskIds;
+    const otherTaskIds = scopedReconcileTaskIds.filter((id) => id !== taskId);
+    const currentTaskOwnedFiles = collectOwnedFilesForTasks(ownedState, [taskId]);
+    const otherTaskOwnedFiles = collectOwnedFilesForTasks(ownedState, otherTaskIds);
+    const scoped = classifyResumeDirtyFiles(
+      currentDirtyFiles,
+      baseline?.files ?? null,
+      [...setupOwnedSet],
+      currentTaskOwnedFiles
+    );
+    const otherScoped = classifyResumeDirtyFiles(
+      currentDirtyFiles,
+      baseline?.files ?? null,
+      [...setupOwnedSet],
+      otherTaskOwnedFiles
+    );
+    const otherResidueFiles = new Set(otherScoped.taskOwnedResidueFiles);
+    return {
+      residueFiles: scoped.taskOwnedResidueFiles,
+      ambiguousFiles: scoped.ambiguousFiles.filter((file) => !otherResidueFiles.has(file))
+    };
+  }
   finalSummaryPath() {
     return (0, import_path11.join)(this.repo.projectRoot(), ".workflow", "final-summary.md");
   }
@@ -4199,7 +4340,15 @@ ${summary}`;
   async getResumeDirtyState(currentDirtyFiles = this.repo.listChangedFiles()) {
     const baseline = await loadDirtyBaseline(this.repo.projectRoot());
     const setupOwnedSet = await this.loadSetupOwnedSet();
+    const setupOwnedFiles = [...setupOwnedSet];
     const taskOwnedFiles = collectOwnedFiles(await loadOwnedFiles(this.repo.projectRoot()));
+    const setupOwnedClassification = classifyResumeDirtyFiles(
+      currentDirtyFiles,
+      baseline?.files ?? null,
+      [],
+      setupOwnedFiles
+    );
+    const setupOwnedResidueFiles = setupOwnedClassification.taskOwnedResidueFiles;
     const classified = classifyResumeDirtyFiles(
       currentDirtyFiles,
       baseline?.files ?? null,
@@ -4214,6 +4363,7 @@ ${summary}`;
           lines: ["\u672A\u627E\u5230 dirty baseline\uFF1B\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u672A\u5F52\u6863\u53D8\u66F4\uFF0C\u4F46\u65E0\u6CD5\u8BC1\u660E\u8FD9\u662F\u5E72\u51C0\u91CD\u542F"],
           residueFiles,
           ambiguousFiles,
+          setupOwnedResidueFiles,
           baselineFound: false
         };
       }
@@ -4228,10 +4378,15 @@ ${summary}`;
         lines2.push(`\u4FDD\u5B88\u4FDD\u7559 ${ambiguousFiles.length} \u4E2A\u5F52\u5C5E\u672A\u660E\u53D8\u66F4\uFF08\u53EF\u80FD\u5305\u542B\u7528\u6237\u624B\u52A8\u4FEE\u6539/\u5220\u9664\uFF0CFlowPilot \u4E0D\u4F1A\u81EA\u52A8\u6062\u590D\u8FD9\u4E9B\u6587\u4EF6\uFF09:`);
         lines2.push(...ambiguousFiles.map((file) => `- ${file}`));
       }
+      if (setupOwnedResidueFiles.length) {
+        lines2.push(`\u53E6\u6709 ${setupOwnedResidueFiles.length} \u4E2A setup-owned \u6587\u4EF6\u6B8B\u7559\u6539\u52A8\uFF08\u6062\u590D\u9636\u6BB5\u4EC5\u63D0\u793A\uFF0Cfinish \u65F6\u4ECD\u4F1A\u4E25\u683C\u6821\u9A8C\uFF09:`);
+        lines2.push(...setupOwnedResidueFiles.map((file) => `- ${file}`));
+      }
       return {
         lines: lines2,
         residueFiles,
         ambiguousFiles,
+        setupOwnedResidueFiles,
         baselineFound: false
       };
     }
@@ -4240,6 +4395,7 @@ ${summary}`;
         lines: ["\u5F53\u524D\u5DE5\u4F5C\u533A\u65E0\u5F85\u63A5\u7BA1\u53D8\u66F4\uFF0C\u672C\u6B21\u6062\u590D\u662F\u5E72\u51C0\u91CD\u542F"],
         residueFiles: [],
         ambiguousFiles: [],
+        setupOwnedResidueFiles,
         baselineFound: true
       };
     }
@@ -4256,7 +4412,11 @@ ${summary}`;
       lines.push(`\u53D1\u73B0 ${ambiguousFiles.length} \u4E2A\u5DE5\u4F5C\u6D41\u671F\u95F4\u65B0\u589E\u4F46\u5F52\u5C5E\u672A\u660E\u7684\u53D8\u66F4\uFF08\u53EF\u80FD\u5305\u542B\u7528\u6237\u624B\u52A8\u4FEE\u6539/\u5220\u9664\uFF0CFlowPilot \u4E0D\u4F1A\u81EA\u52A8\u6062\u590D\u8FD9\u4E9B\u6587\u4EF6\uFF09:`);
       lines.push(...ambiguousFiles.map((file) => `- ${file}`));
     }
-    return { lines, residueFiles, ambiguousFiles, baselineFound: true };
+    if (setupOwnedResidueFiles.length) {
+      lines.push(`\u53D1\u73B0 ${setupOwnedResidueFiles.length} \u4E2A setup-owned \u6587\u4EF6\u6B8B\u7559\u6539\u52A8\uFF08\u6062\u590D\u9636\u6BB5\u4EC5\u63D0\u793A\uFF0Cfinish \u65F6\u4ECD\u4F1A\u4E25\u683C\u6821\u9A8C\uFF09:`);
+      lines.push(...setupOwnedResidueFiles.map((file) => `- ${file}`));
+    }
+    return { lines, residueFiles, ambiguousFiles, setupOwnedResidueFiles, baselineFound: true };
   }
   async assertNotReconciling(data) {
     if (data.status !== "reconciling") return;
@@ -4302,63 +4462,65 @@ ${detail}
   }
   /** init: 解析任务markdown → 生成progress/tasks */
   async init(tasksMd, force = false) {
-    try {
-      const reviewResult = await review(this.repo.projectRoot());
-      if (reviewResult.rolledBack) log.info(`[\u81EA\u6108] \u5DF2\u56DE\u6EDA: ${reviewResult.rollbackReason}`);
-      for (const c of reviewResult.checks.filter((c2) => !c2.passed)) log.info(`[\u81EA\u6108] ${c.name}: ${c.detail}`);
-    } catch (e) {
-      log.debug(`[\u81EA\u6108] review \u8DF3\u8FC7: ${e}`);
-    }
-    const existing = await this.repo.loadProgress();
-    if (existing && existing.status === "running" && !force) {
-      throw new Error(`\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5DE5\u4F5C\u6D41: ${existing.name}\uFF0C\u4F7F\u7528 --force \u8986\u76D6`);
-    }
-    const def = this.parse(tasksMd);
-    const tasks = def.tasks.map((t, i) => ({
-      id: makeTaskId(i + 1),
-      title: t.title,
-      description: t.description,
-      type: t.type,
-      status: "pending",
-      deps: t.deps,
-      summary: "",
-      retries: 0
-    }));
-    const data = {
-      name: def.name,
-      status: "running",
-      current: null,
-      tasks,
-      startTime: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    this.locallyActivatedTaskIds.clear();
-    setWorkflowName(def.name);
-    await this.repo.saveProgress(data);
-    await this.repo.saveTasks(tasksMd);
-    await this.repo.saveSummary(`# ${def.name}
+    return this.withRepoLock(async () => {
+      try {
+        const reviewResult = await review(this.repo.projectRoot());
+        if (reviewResult.rolledBack) log.info(`[\u81EA\u6108] \u5DF2\u56DE\u6EDA: ${reviewResult.rollbackReason}`);
+        for (const c of reviewResult.checks.filter((c2) => !c2.passed)) log.info(`[\u81EA\u6108] ${c.name}: ${c.detail}`);
+      } catch (e) {
+        log.debug(`[\u81EA\u6108] review \u8DF3\u8FC7: ${e}`);
+      }
+      const existing = await this.repo.loadProgress();
+      if (existing && ["running", "reconciling", "finishing"].includes(existing.status) && !force) {
+        throw new Error(`\u5DF2\u6709\u8FDB\u884C\u4E2D\u7684\u5DE5\u4F5C\u6D41: ${existing.name}\uFF08\u72B6\u6001: ${existing.status}\uFF09\uFF0C\u4F7F\u7528 --force \u8986\u76D6`);
+      }
+      const def = this.parse(tasksMd);
+      const tasks = def.tasks.map((t, i) => ({
+        id: makeTaskId(i + 1),
+        title: t.title,
+        description: t.description,
+        type: t.type,
+        status: "pending",
+        deps: t.deps,
+        summary: "",
+        retries: 0
+      }));
+      const data = {
+        name: def.name,
+        status: "running",
+        current: null,
+        tasks,
+        startTime: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      this.locallyActivatedTaskIds.clear();
+      setWorkflowName(def.name);
+      await this.repo.saveProgress(data);
+      await this.repo.saveTasks(tasksMd);
+      await this.repo.saveSummary(`# ${def.name}
 
 ${def.description}
 `);
-    await clearReconcileState(this.repo.projectRoot());
-    await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
-    const client = await this.loadPreferredClient();
-    const setupOwnedFiles = [];
-    if (await this.repo.ensureClaudeMd(client)) {
-      setupOwnedFiles.push((await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? "AGENTS.md");
-    }
-    if (client === "snow-cli" && await this.repo.ensureRoleMd(client)) setupOwnedFiles.push("ROLE.md");
-    if (client === "claude" && await this.repo.ensureHooks()) setupOwnedFiles.push(".claude/settings.json");
-    if (await this.repo.ensureLocalStateIgnored()) setupOwnedFiles.push(".gitignore");
-    await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
-    await this.applyHistoryInsights();
-    await decayMemory(this.repo.projectRoot());
-    const memories = await loadMemory(this.repo.projectRoot());
-    if (memories.filter((e) => !e.archived).length > 50) {
-      await compactMemory(this.repo.projectRoot());
-    }
-    this.stopHeartbeat?.();
-    this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
-    return data;
+      await clearReconcileState(this.repo.projectRoot());
+      await saveDirtyBaseline(this.repo.projectRoot(), this.repo.listChangedFiles(), data.startTime);
+      const client = await this.loadPreferredClient();
+      const setupOwnedFiles = [];
+      if (await this.repo.ensureClaudeMd(client)) {
+        setupOwnedFiles.push((await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? "AGENTS.md");
+      }
+      if (client === "snow-cli" && await this.repo.ensureRoleMd(client)) setupOwnedFiles.push("ROLE.md");
+      if (client === "claude" && await this.repo.ensureHooks()) setupOwnedFiles.push(".claude/settings.json");
+      if (await this.repo.ensureLocalStateIgnored()) setupOwnedFiles.push(".gitignore");
+      await saveSetupOwnedFiles(this.repo.projectRoot(), setupOwnedFiles);
+      await this.applyHistoryInsights();
+      await decayMemory(this.repo.projectRoot());
+      const memories = await loadMemory(this.repo.projectRoot());
+      if (memories.filter((e) => !e.archived).length > 50) {
+        await compactMemory(this.repo.projectRoot());
+      }
+      this.stopHeartbeat?.();
+      this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
+      return data;
+    });
   }
   /** next: 获取下一个可执行任务（含依赖上下文） */
   async next() {
@@ -4551,74 +4713,76 @@ ${warns.join("\n")}` : msg;
   }
   /** resume: 中断恢复 */
   async resume() {
-    const data = await this.repo.loadProgress();
-    if (!data) return "\u65E0\u6D3B\u8DC3\u5DE5\u4F5C\u6D41\uFF0C\u7B49\u5F85\u9700\u6C42\u8F93\u5165";
-    log.debug(`resume: status=${data.status}, current=${data.current}`);
-    if (data.status === "idle") return "\u5DE5\u4F5C\u6D41\u5F85\u547D\u4E2D\uFF0C\u7B49\u5F85\u9700\u6C42\u8F93\u5165";
-    if (data.status === "completed") return "\u5DE5\u4F5C\u6D41\u5DF2\u5168\u90E8\u5B8C\u6210";
-    if (data.status === "finishing") {
-      return [
-        "**\u2550\u2550\u2550 \u5F53\u524D\u72B6\u6001 \u2550\u2550\u2550**",
-        `\u{1F3C1} \u5DE5\u4F5C\u6D41: ${data.name || "\u672A\u547D\u540D\u5DE5\u4F5C\u6D41"}`,
-        "\u{1F4CD} \u72B6\u6001: \u6536\u5C3E\u9636\u6BB5",
-        "",
-        "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
-        "\u{1F449} \u8FD0\u884C `node flow.js finish` \u5B8C\u6210\u6700\u7EC8\u6536\u5C3E"
-      ].join("\n");
-    }
-    if (data.status === "reconciling") {
-      const doneCount2 = data.tasks.filter((t) => t.status === "done").length;
-      const total2 = data.tasks.length;
-      const reconcile = await loadReconcileState(this.repo.projectRoot());
-      const dirtyState2 = await this.getResumeDirtyState();
-      return [
+    return this.withRepoLock(async () => {
+      const data = await this.repo.loadProgress();
+      if (!data) return "\u65E0\u6D3B\u8DC3\u5DE5\u4F5C\u6D41\uFF0C\u7B49\u5F85\u9700\u6C42\u8F93\u5165";
+      log.debug(`resume: status=${data.status}, current=${data.current}`);
+      if (data.status === "idle") return "\u5DE5\u4F5C\u6D41\u5F85\u547D\u4E2D\uFF0C\u7B49\u5F85\u9700\u6C42\u8F93\u5165";
+      if (data.status === "completed") return "\u5DE5\u4F5C\u6D41\u5DF2\u5168\u90E8\u5B8C\u6210";
+      if (data.status === "finishing") {
+        return [
+          "**\u2550\u2550\u2550 \u5F53\u524D\u72B6\u6001 \u2550\u2550\u2550**",
+          `\u{1F3C1} \u5DE5\u4F5C\u6D41: ${data.name || "\u672A\u547D\u540D\u5DE5\u4F5C\u6D41"}`,
+          "\u{1F4CD} \u72B6\u6001: \u6536\u5C3E\u9636\u6BB5",
+          "",
+          "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
+          "\u{1F449} \u8FD0\u884C `node flow.js finish` \u5B8C\u6210\u6700\u7EC8\u6536\u5C3E"
+        ].join("\n");
+      }
+      if (data.status === "reconciling") {
+        const doneCount2 = data.tasks.filter((t) => t.status === "done").length;
+        const total2 = data.tasks.length;
+        const reconcile = await loadReconcileState(this.repo.projectRoot());
+        const dirtyState2 = await this.getResumeDirtyState();
+        return [
+          "**\u2550\u2550\u2550 \u6062\u590D\u5DE5\u4F5C\u6D41 \u2550\u2550\u2550**",
+          `\u{1F4C2} ${data.name}`,
+          `\u{1F4CA} \u8FDB\u5EA6: ${doneCount2}/${total2}`,
+          `\u26A0\uFE0F \u5F85\u63A5\u7BA1\u4E2D\u65AD\u4EFB\u52A1: ${reconcile.taskIds.join(", ") || data.current || "\u672A\u77E5"}`,
+          "",
+          "\u{1F449} \u8BF7\u5148\u6267\u884C `node flow.js adopt <id> --files ...`",
+          "   \u6216\u5728\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E `node flow.js restart <id>`",
+          "   \u82E5\u5B58\u5728\u5F52\u5C5E\u672A\u660E\u53D8\u66F4\uFF0C\u5FC5\u987B\u5148\u4EBA\u5DE5\u786E\u8BA4\uFF1B\u4E0D\u8981\u6574\u6587\u4EF6 git restore",
+          "   \u4E0D\u5F97\u5904\u7406 baseline \u53D8\u66F4\u6216\u672A\u5217\u51FA\u7684\u5176\u4ED6\u9879\u76EE\u4EE3\u7801",
+          ...dirtyState2.lines
+        ].join("\n");
+      }
+      const hadActiveTasks = data.tasks.filter((t) => t.status === "active").map((t) => t.id);
+      const { data: resumedData, resetId } = resumeProgress(data);
+      this.locallyActivatedTaskIds.clear();
+      const dirtyState = await this.getResumeDirtyState();
+      const shouldReconcile = hadActiveTasks.length > 0 && (dirtyState.residueFiles.length > 0 || dirtyState.ambiguousFiles.length > 0);
+      const newData = shouldReconcile ? { ...resumedData, status: "reconciling", current: hadActiveTasks[0] ?? resumedData.current } : resumedData;
+      await this.repo.saveProgress(newData);
+      if (shouldReconcile) {
+        await saveReconcileState(this.repo.projectRoot(), hadActiveTasks);
+      } else {
+        await clearReconcileState(this.repo.projectRoot());
+      }
+      if (resetId && !shouldReconcile) {
+        log.debug(`resume: \u91CD\u7F6E\u4EFB\u52A1 ${resetId}`);
+        this.repo.cleanup();
+      }
+      const doneCount = newData.tasks.filter((t) => t.status === "done").length;
+      const total = newData.tasks.length;
+      this.stopHeartbeat?.();
+      this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
+      const statusIcon = shouldReconcile ? "\u26A0\uFE0F" : resetId ? "\u{1F504}" : "\u25B6\uFE0F";
+      const statusMsg = shouldReconcile ? `\u68C0\u6D4B\u5230\u4E2D\u65AD\u4EFB\u52A1 ${hadActiveTasks.join(", ")} \u7684\u5F85\u5904\u7406\u53D8\u66F4\uFF0C\u5DF2\u6682\u505C\u8C03\u5EA6` : resetId ? `\u4E2D\u65AD\u4EFB\u52A1 ${resetId} \u5DF2\u91CD\u7F6E\uFF0C\u5C06\u91CD\u65B0\u6267\u884C` : "\u7EE7\u7EED\u6267\u884C";
+      const lines = [
         "**\u2550\u2550\u2550 \u6062\u590D\u5DE5\u4F5C\u6D41 \u2550\u2550\u2550**",
-        `\u{1F4C2} ${data.name}`,
-        `\u{1F4CA} \u8FDB\u5EA6: ${doneCount2}/${total2}`,
-        `\u26A0\uFE0F \u5F85\u63A5\u7BA1\u4E2D\u65AD\u4EFB\u52A1: ${reconcile.taskIds.join(", ") || data.current || "\u672A\u77E5"}`,
-        "",
-        "\u{1F449} \u8BF7\u5148\u6267\u884C `node flow.js adopt <id> --files ...`",
-        "   \u6216\u5728\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E `node flow.js restart <id>`",
-        "   \u82E5\u5B58\u5728\u5F52\u5C5E\u672A\u660E\u53D8\u66F4\uFF0C\u5FC5\u987B\u5148\u4EBA\u5DE5\u786E\u8BA4\uFF1B\u4E0D\u8981\u6574\u6587\u4EF6 git restore",
-        "   \u4E0D\u5F97\u5904\u7406 baseline \u53D8\u66F4\u6216\u672A\u5217\u51FA\u7684\u5176\u4ED6\u9879\u76EE\u4EE3\u7801",
-        ...dirtyState2.lines
-      ].join("\n");
-    }
-    const hadActiveTasks = data.tasks.filter((t) => t.status === "active").map((t) => t.id);
-    const { data: resumedData, resetId } = resumeProgress(data);
-    this.locallyActivatedTaskIds.clear();
-    const dirtyState = await this.getResumeDirtyState();
-    const shouldReconcile = hadActiveTasks.length > 0 && (dirtyState.residueFiles.length > 0 || dirtyState.ambiguousFiles.length > 0);
-    const newData = shouldReconcile ? { ...resumedData, status: "reconciling", current: hadActiveTasks[0] ?? resumedData.current } : resumedData;
-    await this.repo.saveProgress(newData);
-    if (shouldReconcile) {
-      await saveReconcileState(this.repo.projectRoot(), hadActiveTasks);
-    } else {
-      await clearReconcileState(this.repo.projectRoot());
-    }
-    if (resetId && !shouldReconcile) {
-      log.debug(`resume: \u91CD\u7F6E\u4EFB\u52A1 ${resetId}`);
-      this.repo.cleanup();
-    }
-    const doneCount = newData.tasks.filter((t) => t.status === "done").length;
-    const total = newData.tasks.length;
-    this.stopHeartbeat?.();
-    this.stopHeartbeat = startHeartbeat(this.repo.projectRoot());
-    const statusIcon = shouldReconcile ? "\u26A0\uFE0F" : resetId ? "\u{1F504}" : "\u25B6\uFE0F";
-    const statusMsg = shouldReconcile ? `\u68C0\u6D4B\u5230\u4E2D\u65AD\u4EFB\u52A1 ${hadActiveTasks.join(", ")} \u7684\u5F85\u5904\u7406\u53D8\u66F4\uFF0C\u5DF2\u6682\u505C\u8C03\u5EA6` : resetId ? `\u4E2D\u65AD\u4EFB\u52A1 ${resetId} \u5DF2\u91CD\u7F6E\uFF0C\u5C06\u91CD\u65B0\u6267\u884C` : "\u7EE7\u7EED\u6267\u884C";
-    const lines = [
-      "**\u2550\u2550\u2550 \u6062\u590D\u5DE5\u4F5C\u6D41 \u2550\u2550\u2550**",
-      `\u{1F4C2} ${newData.name}`,
-      `\u{1F4CA} \u8FDB\u5EA6: ${doneCount}/${total}`,
-      statusIcon + " " + statusMsg,
-      ...dirtyState.lines
-    ];
-    if (shouldReconcile) {
-      lines.push("");
-      lines.push("\u{1F449} \u8BF7\u5148\u6267\u884C `node flow.js adopt " + hadActiveTasks[0] + " --files ...`");
-      lines.push("   \u6216\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E `node flow.js restart " + hadActiveTasks[0] + "`");
-    }
-    return lines.join("\n");
+        `\u{1F4C2} ${newData.name}`,
+        `\u{1F4CA} \u8FDB\u5EA6: ${doneCount}/${total}`,
+        statusIcon + " " + statusMsg,
+        ...dirtyState.lines
+      ];
+      if (shouldReconcile) {
+        lines.push("");
+        lines.push("\u{1F449} \u8BF7\u5148\u6267\u884C `node flow.js adopt " + hadActiveTasks[0] + " --files ...`");
+        lines.push("   \u6216\u786E\u8BA4\u5E76\u5904\u7406\u5217\u51FA\u7684\u672C\u4EFB\u52A1\u53D8\u66F4\u540E `node flow.js restart " + hadActiveTasks[0] + "`");
+      }
+      return lines.join("\n");
+    });
   }
   async adopt(id, detail, files) {
     await this.repo.lock();
@@ -4633,13 +4797,29 @@ ${warns.join("\n")}` : msg;
       }
       const task = data.tasks.find((t) => t.id === id);
       if (!task) throw new Error(`\u4EFB\u52A1 ${id} \u4E0D\u5B58\u5728`);
+      const scopedDirtyState = await this.getScopedReconcileDirtyState(id, reconcile.taskIds);
+      if (scopedDirtyState.ambiguousFiles.length > 0) {
+        throw new Error(`\u68C0\u6D4B\u5230 ${scopedDirtyState.ambiguousFiles.length} \u4E2A\u5F52\u5C5E\u672A\u660E\u53D8\u66F4\uFF1A${scopedDirtyState.ambiguousFiles.join(", ")}\u3002\u8FD9\u4E9B\u6587\u4EF6\u53EF\u80FD\u5305\u542B\u7528\u6237\u624B\u52A8\u4FEE\u6539/\u5220\u9664\uFF1B\u8BF7\u5148\u4EBA\u5DE5\u786E\u8BA4\u3002\u82E5\u8FD9\u4E9B\u6587\u4EF6\u5C5E\u4E8E\u4EFB\u52A1\u4EA7\u7269\uFF0C\u8BF7\u5148\u66F4\u65B0 ownership \u518D adopt\uFF0C\u907F\u514D\u628A\u65E0\u5173\u6539\u52A8\u6D17\u767D\u4E3A workflow-owned`);
+      }
+      const expectedFiles = [...scopedDirtyState.residueFiles].sort();
+      const providedFiles = [...new Set((files ?? []).map((file) => file.trim()).filter(Boolean))].sort();
+      if (expectedFiles.length > 0) {
+        if (!providedFiles.length) {
+          throw new Error(`adopt \u9700\u8981\u663E\u5F0F\u5217\u51FA\u5F53\u524D\u4EFB\u52A1 ${id} \u7684\u6B8B\u7559\u6587\u4EF6\uFF1A${expectedFiles.join(", ")}`);
+        }
+        if (expectedFiles.length !== providedFiles.length || expectedFiles.some((file, index) => file !== providedFiles[index])) {
+          throw new Error(`adopt --files \u5FC5\u987B\u7CBE\u786E\u5339\u914D\u5F53\u524D\u4EFB\u52A1 ${id} \u7684\u6B8B\u7559\u6587\u4EF6\u3002\u671F\u671B\uFF1A${expectedFiles.join(", ")}\uFF1B\u5B9E\u9645\uFF1A${providedFiles.join(", ") || "\u65E0"}`);
+        }
+      } else if (providedFiles.length > 0) {
+        throw new Error(`\u4EFB\u52A1 ${id} \u5F53\u524D\u6CA1\u6709\u53EF\u63A5\u7BA1\u7684\u663E\u5F0F\u6B8B\u7559\u6587\u4EF6\uFF0C\u4E0D\u80FD\u901A\u8FC7 adopt --files \u8BA4\u9886\u8FD9\u4E9B\u6587\u4EF6\uFF1A${providedFiles.join(", ")}`);
+      }
       const remainingTaskIds = reconcile.taskIds.filter((taskId) => taskId !== id);
       const baseData = {
         ...data,
         status: remainingTaskIds.length ? "reconciling" : "running",
         current: remainingTaskIds[0] ?? null
       };
-      const message = await this.finalizeSuccessfulTask(baseData, task, detail, files);
+      const message = await this.finalizeSuccessfulTask(baseData, task, detail, providedFiles);
       if (remainingTaskIds.length) {
         await saveReconcileState(this.repo.projectRoot(), remainingTaskIds);
         return `${message}
@@ -4663,7 +4843,7 @@ ${warns.join("\n")}` : msg;
       if (!reconcile.taskIds.includes(id)) {
         throw new Error(`\u4EFB\u52A1 ${id} \u4E0D\u5728\u5F85\u63A5\u7BA1\u5217\u8868\u4E2D`);
       }
-      const dirtyState = await this.getResumeDirtyState();
+      const dirtyState = await this.getScopedReconcileDirtyState(id, reconcile.taskIds);
       if (dirtyState.ambiguousFiles.length > 0) {
         throw new Error(`\u68C0\u6D4B\u5230 ${dirtyState.ambiguousFiles.length} \u4E2A\u5F52\u5C5E\u672A\u660E\u53D8\u66F4\uFF1A${dirtyState.ambiguousFiles.join(", ")}\u3002\u8FD9\u4E9B\u6587\u4EF6\u53EF\u80FD\u5305\u542B\u7528\u6237\u624B\u52A8\u4FEE\u6539/\u5220\u9664\uFF1BFlowPilot \u4E0D\u4F1A\u5EFA\u8BAE\u6574\u6587\u4EF6 git restore\u3002\u8BF7\u5148\u4EBA\u5DE5\u786E\u8BA4\uFF0C\u5C5E\u4E8E\u4EFB\u52A1\u4EA7\u7269\u5219\u4F7F\u7528 node flow.js adopt ${id} --files ... \u663E\u5F0F\u63A5\u7BA1\uFF0C\u5426\u5219\u4FDD\u7559\u8FD9\u4E9B\u6539\u52A8\u5E76\u907F\u514D\u8D8A\u754C\u6E05\u7406`);
       }
@@ -4739,7 +4919,7 @@ ${warns.join("\n")}` : msg;
       };
     }
     const leftoverSetupOwnedFiles = comparison.newDirtyFiles.filter(
-      (file) => setupOwnedSet.has(file) && !NON_BLOCKING_SETUP_RESIDUE_FILES.has(file) && !(file === ".gitignore" && gitignorePolicyMatches)
+      (file) => setupOwnedSet.has(file) && !(file === ".gitignore" && gitignorePolicyMatches)
     );
     if (leftoverSetupOwnedFiles.length > 0) {
       return {
@@ -4816,172 +4996,196 @@ ${warns.join("\n")}` : msg;
   }
   /** setup: 项目接管模式 - 写入 instruction file */
   async setup(client = "other") {
-    const existing = await this.repo.loadProgress();
-    const configBefore = await this.repo.loadConfig();
-    await this.repo.saveConfig({ ...configBefore, client });
-    const wrote = await this.repo.ensureClaudeMd(client);
-    const roleWrote = client === "snow-cli" ? await this.repo.ensureRoleMd(client) : false;
-    if (client === "claude") {
-      await this.repo.ensureHooks();
-    }
-    await this.repo.ensureLocalStateIgnored();
-    const lines = [];
-    if (existing && (existing.status === "running" || existing.status === "finishing")) {
-      const done = existing.tasks.filter((t) => t.status === "done").length;
-      const statusIcon = existing.status === "finishing" ? "\u{1F3C1}" : "\u{1F504}";
-      lines.push("**\u2550\u2550\u2550 \u68C0\u6D4B\u5230\u8FDB\u884C\u4E2D\u7684\u5DE5\u4F5C\u6D41 \u2550\u2550\u2550**");
-      lines.push(`\u{1F4C2} ${existing.name}`);
-      lines.push(`\u{1F4CA} \u8FDB\u5EA6: ${done}/${existing.tasks.length}`);
-      lines.push("");
-      if (existing.status === "finishing") {
-        lines.push("**\u2550\u2550\u2550 \u5F53\u524D\u72B6\u6001 \u2550\u2550\u2550**");
-        lines.push("\u{1F4CD} \u72B6\u6001: \u6536\u5C3E\u9636\u6BB5");
-        lines.push("\u{1F449} \u8FD0\u884C `node flow.js finish` \u7EE7\u7EED");
-      } else {
-        lines.push("**\u2550\u2550\u2550 \u5F53\u524D\u72B6\u6001 \u2550\u2550\u2550**");
-        lines.push("\u23F8 \u72B6\u6001: " + existing.status);
-        lines.push("\u{1F449} \u8FD0\u884C `node flow.js resume` \u7EE7\u7EED");
+    return this.withRepoLock(async () => {
+      const existing = await this.repo.loadProgress();
+      const configBefore = await this.repo.loadConfig();
+      await this.repo.saveConfig({ ...configBefore, client });
+      const wrote = await this.repo.ensureClaudeMd(client);
+      const roleWrote = client === "snow-cli" ? await this.repo.ensureRoleMd(client) : false;
+      if (client === "claude") {
+        await this.repo.ensureHooks();
       }
-    } else {
-      lines.push("**\u2550\u2550\u2550 \u9879\u76EE\u72B6\u6001 \u2550\u2550\u2550**");
-      lines.push("\u2705 \u9879\u76EE\u5DF2\u63A5\u7BA1\uFF0C\u5DE5\u4F5C\u6D41\u5DE5\u5177\u5C31\u7EEA");
-      lines.push("\u23F3 \u7B49\u5F85\u9700\u6C42\u8F93\u5165\uFF08\u6587\u6863\u6216\u5BF9\u8BDD\u63CF\u8FF0\uFF09");
+      await this.repo.ensureLocalStateIgnored();
+      const lines = [];
+      if (existing && ["running", "reconciling", "finishing"].includes(existing.status)) {
+        const done = existing.tasks.filter((t) => t.status === "done").length;
+        lines.push("**\u2550\u2550\u2550 \u68C0\u6D4B\u5230\u8FDB\u884C\u4E2D\u7684\u5DE5\u4F5C\u6D41 \u2550\u2550\u2550**");
+        lines.push(`\u{1F4C2} ${existing.name}`);
+        lines.push(`\u{1F4CA} \u8FDB\u5EA6: ${done}/${existing.tasks.length}`);
+        lines.push("");
+        lines.push("**\u2550\u2550\u2550 \u5F53\u524D\u72B6\u6001 \u2550\u2550\u2550**");
+        if (existing.status === "finishing") {
+          lines.push("\u{1F4CD} \u72B6\u6001: \u6536\u5C3E\u9636\u6BB5");
+          lines.push("\u{1F449} \u8FD0\u884C `node flow.js finish` \u7EE7\u7EED");
+        } else if (existing.status === "reconciling") {
+          lines.push("\u26A0\uFE0F \u72B6\u6001: reconciling");
+          lines.push("\u{1F449} \u8FD0\u884C `node flow.js resume` \u67E5\u770B\u5F85\u63A5\u7BA1\u4EFB\u52A1\uFF0C\u518D\u6267\u884C `adopt / restart / skip`");
+        } else {
+          lines.push("\u23F8 \u72B6\u6001: running");
+          lines.push("\u{1F449} \u8FD0\u884C `node flow.js resume` \u7EE7\u7EED");
+        }
+      } else {
+        lines.push("**\u2550\u2550\u2550 \u9879\u76EE\u72B6\u6001 \u2550\u2550\u2550**");
+        lines.push("\u2705 \u9879\u76EE\u5DF2\u63A5\u7BA1\uFF0C\u5DE5\u4F5C\u6D41\u5DE5\u5177\u5C31\u7EEA");
+        lines.push("\u23F3 \u7B49\u5F85\u9700\u6C42\u8F93\u5165\uFF08\u6587\u6863\u6216\u5BF9\u8BDD\u63CF\u8FF0\uFF09");
+        lines.push("");
+        lines.push("**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**");
+        lines.push("\u{1F4A1} \u63CF\u8FF0\u4F60\u7684\u5F00\u53D1\u4EFB\u52A1\u5373\u53EF\u542F\u52A8\u5168\u81EA\u52A8\u5F00\u53D1");
+      }
       lines.push("");
-      lines.push("**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**");
-      lines.push("\u{1F4A1} \u63CF\u8FF0\u4F60\u7684\u5F00\u53D1\u4EFB\u52A1\u5373\u53EF\u542F\u52A8\u5168\u81EA\u52A8\u5F00\u53D1");
-    }
-    lines.push("");
-    lines.push("**\u2550\u2550\u2550 \u751F\u6210\u7ED3\u679C \u2550\u2550\u2550**");
-    if (wrote) {
-      const instructionPath = (await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? "AGENTS.md";
-      lines.push(`\u2713 ${instructionPath} \u5DF2\u66F4\u65B0\uFF1A\u6DFB\u52A0\u4E86\u5DE5\u4F5C\u6D41\u534F\u8BAE`);
-    }
-    if (roleWrote) {
-      lines.push("\u2713 ROLE.md \u5DF2\u66F4\u65B0\uFF1A\u4E0E AGENTS.md \u4FDD\u6301\u4E00\u81F4");
-    }
-    if (client === "claude") {
-      lines.push("\u2713 .claude/settings.json \u5DF2\u66F4\u65B0\uFF1A\u6DFB\u52A0\u4E86 Claude Code Hooks");
-    }
-    if (!lines.includes("\u63CF\u8FF0\u4F60\u7684\u5F00\u53D1\u4EFB\u52A1\u5373\u53EF\u542F\u52A8\u5168\u81EA\u52A8\u5F00\u53D1")) {
-      lines.push("");
-      lines.push("**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**");
-      lines.push("\u{1F4A1} \u63CF\u8FF0\u4F60\u7684\u5F00\u53D1\u4EFB\u52A1\u5373\u53EF\u542F\u52A8\u5168\u81EA\u52A8\u5F00\u53D1");
-    }
-    return lines.join("\n");
+      lines.push("**\u2550\u2550\u2550 \u751F\u6210\u7ED3\u679C \u2550\u2550\u2550**");
+      if (wrote) {
+        const instructionPath = (await loadSetupInjectionManifest(this.repo.projectRoot())).claudeMd?.path ?? "AGENTS.md";
+        lines.push(`\u2713 ${instructionPath} \u5DF2\u66F4\u65B0\uFF1A\u6DFB\u52A0\u4E86\u5DE5\u4F5C\u6D41\u534F\u8BAE`);
+      }
+      if (roleWrote) {
+        lines.push("\u2713 ROLE.md \u5DF2\u66F4\u65B0\uFF1A\u4E0E AGENTS.md \u4FDD\u6301\u4E00\u81F4");
+      }
+      if (client === "claude") {
+        lines.push("\u2713 .claude/settings.json \u5DF2\u66F4\u65B0\uFF1A\u6DFB\u52A0\u4E86 Claude Code Hooks");
+      }
+      if (!lines.includes("\u{1F4A1} \u63CF\u8FF0\u4F60\u7684\u5F00\u53D1\u4EFB\u52A1\u5373\u53EF\u542F\u52A8\u5168\u81EA\u52A8\u5F00\u53D1") && (!existing || !["reconciling", "running", "finishing"].includes(existing.status))) {
+        lines.push("");
+        lines.push("**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**");
+        lines.push("\u{1F4A1} \u63CF\u8FF0\u4F60\u7684\u5F00\u53D1\u4EFB\u52A1\u5373\u53EF\u542F\u52A8\u5168\u81EA\u52A8\u5F00\u53D1");
+      }
+      return lines.join("\n");
+    });
   }
   /** review: 标记已通过code-review，解锁finish */
   async review() {
-    const data = await this.requireProgress();
-    if (!isAllDone(data.tasks)) throw new Error("\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148\u5B8C\u6210\u6240\u6709\u4EFB\u52A1");
-    if (data.status === "finishing") return "**\u2550\u2550\u2550 \u4EE3\u7801\u5BA1\u67E5 \u2550\u2550\u2550**\n\u2713 \u5DF2\u5904\u4E8E review \u901A\u8FC7\u72B6\u6001\n\n**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**\n\u{1F449} \u8FD0\u884C `node flow.js finish` \u5B8C\u6210\u6536\u5C3E";
-    await this.repo.saveProgress({ ...data, status: "finishing" });
-    return "**\u2550\u2550\u2550 \u4EE3\u7801\u5BA1\u67E5 \u2550\u2550\u2550**\n\u2705 \u4EE3\u7801\u5BA1\u67E5\u5DF2\u901A\u8FC7\n\n**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**\n\u{1F449} \u8FD0\u884C `node flow.js finish` \u5B8C\u6210\u6536\u5C3E";
+    return this.withRepoLock(async () => {
+      const data = await this.requireProgress();
+      if (!isAllDone(data.tasks)) throw new Error("\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148\u5B8C\u6210\u6240\u6709\u4EFB\u52A1");
+      if (data.status === "finishing") return "**\u2550\u2550\u2550 \u4EE3\u7801\u5BA1\u67E5 \u2550\u2550\u2550**\n\u2713 \u5DF2\u5904\u4E8E review \u901A\u8FC7\u72B6\u6001\n\n**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**\n\u{1F449} \u8FD0\u884C `node flow.js finish` \u5B8C\u6210\u6536\u5C3E";
+      await this.repo.saveProgress({ ...data, status: "finishing" });
+      return "**\u2550\u2550\u2550 \u4EE3\u7801\u5BA1\u67E5 \u2550\u2550\u2550**\n\u2705 \u4EE3\u7801\u5BA1\u67E5\u5DF2\u901A\u8FC7\n\n**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**\n\u{1F449} \u8FD0\u884C `node flow.js finish` \u5B8C\u6210\u6536\u5C3E";
+    });
   }
   /** finish: 智能收尾 - 先verify，review后置 */
   async finish() {
-    const data = await this.requireProgress();
-    log.debug(`finish: status=${data.status}`);
-    if (data.status === "idle" || data.status === "completed") return "\u5DE5\u4F5C\u6D41\u5DF2\u5B8C\u6210\uFF0C\u65E0\u9700\u91CD\u590Dfinish";
-    if (!isAllDone(data.tasks)) throw new Error("\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148\u5B8C\u6210\u6240\u6709\u4EFB\u52A1");
-    this.stopHeartbeat?.();
-    this.stopHeartbeat = null;
-    const result = this.repo.verify();
-    log.debug(`finish: verify passed=${result.passed}`);
-    if (!result.passed) {
-      return [
-        "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
-        "\u2717 \u9A8C\u8BC1\u5931\u8D25",
-        "",
-        "\u{1F4CB} \u9519\u8BEF\u8BE6\u60C5:",
-        result.error,
-        "",
-        "\u{1F449} \u8BF7\u4FEE\u590D\u540E\u91CD\u65B0\u6267\u884C `node flow.js finish`"
-      ].join("\n");
-    }
-    const verifySummary = this.formatVerifySummary(result);
-    if (data.status !== "finishing") {
-      return [
-        "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
-        "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
-        verifySummary,
-        "",
-        "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
-        "1. \u6D3E\u5B50Agent\u6267\u884C code-review",
-        "2. \u5B8C\u6210\u540E\u8FD0\u884C `node flow.js review`",
-        "3. \u518D\u8FD0\u884C `node flow.js finish`"
-      ].join("\n");
-    }
-    const done = data.tasks.filter((t) => t.status === "done");
-    const skipped2 = data.tasks.filter((t) => t.status === "skipped");
-    const failed = data.tasks.filter((t) => t.status === "failed");
-    const stats = [`${done.length} done`, skipped2.length ? `${skipped2.length} skipped` : "", failed.length ? `${failed.length} failed` : ""].filter(Boolean).join(", ");
-    const finalSummary = formatFinalSummary(data);
-    const finishBoundary = await this.resolveFinishCommitFiles();
-    if (finishBoundary.ok === false) {
-      return [
-        "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
-        "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
-        verifySummary,
-        "",
-        "**\u2550\u2550\u2550 \u5B8C\u6210\u7EDF\u8BA1 \u2550\u2550\u2550**",
-        stats,
-        "",
-        finalSummary,
-        finishBoundary.message
-      ].join("\n");
-    }
-    if (finishBoundary.ok === "degraded") {
-      await this.persistFinalSummary(finalSummary);
-      return [
-        "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
-        "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
-        verifySummary,
-        "",
-        "**\u2550\u2550\u2550 \u5B8C\u6210\u7EDF\u8BA1 \u2550\u2550\u2550**",
-        stats,
-        "",
-        finalSummary,
-        finishBoundary.message,
-        "",
-        "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
-        "\u26A0\uFE0F \u672A\u63D0\u4EA4\u6700\u7EC8commit\uFF1A\u672A\u627E\u5230 dirty baseline\uFF0C\u4FDD\u5B88\u8DF3\u8FC7 auto-commit",
-        "\u{1F449} \u5DE5\u4F5C\u6D41\u4ECD\u505C\u7559\u5728\u6536\u5C3E\u9636\u6BB5\uFF0C\u8BF7\u5148\u5904\u7406\u6700\u7EC8\u63D0\u4EA4\u8FB9\u754C\uFF0C\u518D\u91CD\u65B0\u6267\u884C `node flow.js finish`"
-      ].join("\n");
-    }
-    const titles = done.map((t) => `- ${t.id}: ${t.title}`).join("\n");
-    const finishCommitSummary = `${stats}
+    return this.withRepoLock(async () => {
+      const data = await this.requireProgress();
+      log.debug(`finish: status=${data.status}`);
+      if (data.status === "idle" || data.status === "completed") return "\u5DE5\u4F5C\u6D41\u5DF2\u5B8C\u6210\uFF0C\u65E0\u9700\u91CD\u590Dfinish";
+      if (!isAllDone(data.tasks)) throw new Error("\u8FD8\u6709\u672A\u5B8C\u6210\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148\u5B8C\u6210\u6240\u6709\u4EFB\u52A1");
+      this.stopHeartbeat?.();
+      this.stopHeartbeat = null;
+      const result = this.repo.verify();
+      log.debug(`finish: verify passed=${result.passed}`);
+      if (!result.passed) {
+        return [
+          "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
+          "\u2717 \u9A8C\u8BC1\u5931\u8D25",
+          "",
+          "\u{1F4CB} \u9519\u8BEF\u8BE6\u60C5:",
+          result.error,
+          "",
+          "\u{1F449} \u8BF7\u4FEE\u590D\u540E\u91CD\u65B0\u6267\u884C `node flow.js finish`"
+        ].join("\n");
+      }
+      const verifySummary = this.formatVerifySummary(result);
+      if (data.status !== "finishing") {
+        return [
+          "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
+          "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
+          verifySummary,
+          "",
+          "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
+          "1. \u6D3E\u5B50Agent\u6267\u884C code-review",
+          "2. \u5B8C\u6210\u540E\u8FD0\u884C `node flow.js review`",
+          "3. \u518D\u8FD0\u884C `node flow.js finish`"
+        ].join("\n");
+      }
+      const done = data.tasks.filter((t) => t.status === "done");
+      const skipped2 = data.tasks.filter((t) => t.status === "skipped");
+      const failed = data.tasks.filter((t) => t.status === "failed");
+      const stats = [`${done.length} done`, skipped2.length ? `${skipped2.length} skipped` : "", failed.length ? `${failed.length} failed` : ""].filter(Boolean).join(", ");
+      const finalSummary = formatFinalSummary(data);
+      const finishBoundary = await this.resolveFinishCommitFiles();
+      if (finishBoundary.ok === false) {
+        return [
+          "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
+          "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
+          verifySummary,
+          "",
+          "**\u2550\u2550\u2550 \u5B8C\u6210\u7EDF\u8BA1 \u2550\u2550\u2550**",
+          stats,
+          "",
+          finalSummary,
+          finishBoundary.message
+        ].join("\n");
+      }
+      if (finishBoundary.ok === "degraded") {
+        await this.persistFinalSummary(finalSummary);
+        return [
+          "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
+          "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
+          verifySummary,
+          "",
+          "**\u2550\u2550\u2550 \u5B8C\u6210\u7EDF\u8BA1 \u2550\u2550\u2550**",
+          stats,
+          "",
+          finalSummary,
+          finishBoundary.message,
+          "",
+          "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
+          "\u26A0\uFE0F \u672A\u63D0\u4EA4\u6700\u7EC8commit\uFF1A\u672A\u627E\u5230 dirty baseline\uFF0C\u4FDD\u5B88\u8DF3\u8FC7 auto-commit",
+          "\u{1F449} \u5DE5\u4F5C\u6D41\u4ECD\u505C\u7559\u5728\u6536\u5C3E\u9636\u6BB5\uFF0C\u8BF7\u5148\u5904\u7406\u6700\u7EC8\u63D0\u4EA4\u8FB9\u754C\uFF0C\u518D\u91CD\u65B0\u6267\u884C `node flow.js finish`"
+        ].join("\n");
+      }
+      const titles = done.map((t) => `- ${t.id}: ${t.title}`).join("\n");
+      const finishCommitSummary = `${stats}
 
 ${titles}`;
-    const commitResult = finishBoundary.files.length > 0 ? this.repo.commit("finish", data.name || "\u5DE5\u4F5C\u6D41\u5B8C\u6210", finishCommitSummary, finishBoundary.files) : this.createEmptyFinalCommit(data.name || "\u5DE5\u4F5C\u6D41\u5B8C\u6210", finishCommitSummary);
-    if (commitResult.status === "committed") {
-      await this.persistFinalSummary(finalSummary);
-      await runLifecycleHook("onWorkflowFinish", this.repo.projectRoot(), { WORKFLOW_NAME: data.name });
-      const wfStats = collectStats(data);
-      await this.repo.saveHistory(wfStats);
-      const configBeforeEvolution = await this.repo.loadConfig();
-      const reflectReport = await reflect(wfStats, this.repo.projectRoot());
-      const experimentRan = reflectReport.experiments.length > 0;
-      if (experimentRan) {
-        await experiment(reflectReport, this.repo.projectRoot());
-      }
-      const configAfterEvolution = await this.repo.loadConfig();
-      const changedConfigKeys = this.diffConfigKeys(configBeforeEvolution, configAfterEvolution);
-      if (changedConfigKeys.length > 0) {
-        await this.repo.saveEvolution({
-          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-          workflowName: data.name,
-          configBefore: configBeforeEvolution,
-          configAfter: configAfterEvolution,
-          suggestions: []
+      const commitResult = finishBoundary.files.length > 0 ? this.repo.commit("finish", data.name || "\u5DE5\u4F5C\u6D41\u5B8C\u6210", finishCommitSummary, finishBoundary.files) : this.createEmptyFinalCommit(data.name || "\u5DE5\u4F5C\u6D41\u5B8C\u6210", finishCommitSummary);
+      if (commitResult.status === "committed") {
+        await this.persistFinalSummary(finalSummary);
+        await runLifecycleHook("onWorkflowFinish", this.repo.projectRoot(), { WORKFLOW_NAME: data.name });
+        const wfStats = collectStats(data);
+        await this.repo.saveHistory(wfStats);
+        const configBeforeEvolution = await this.repo.loadConfig();
+        const reflectReport = await reflect(wfStats, this.repo.projectRoot());
+        const experimentRan = reflectReport.experiments.length > 0;
+        if (experimentRan) {
+          await experiment(reflectReport, this.repo.projectRoot());
+        }
+        const configAfterEvolution = await this.repo.loadConfig();
+        const changedConfigKeys = this.diffConfigKeys(configBeforeEvolution, configAfterEvolution);
+        if (changedConfigKeys.length > 0) {
+          await this.repo.saveEvolution({
+            timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+            workflowName: data.name,
+            configBefore: configBeforeEvolution,
+            configAfter: configAfterEvolution,
+            suggestions: []
+          });
+        }
+        const evolutionSummary = this.formatEvolutionSummary({
+          reflectRan: true,
+          experimentRan,
+          changedConfigKeys
         });
+        this.repo.cleanTags();
+        await this.repo.clearAll();
+        return [
+          "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
+          "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
+          verifySummary,
+          "",
+          "**\u2550\u2550\u2550 \u5B8C\u6210\u7EDF\u8BA1 \u2550\u2550\u2550**",
+          stats,
+          "",
+          finalSummary,
+          `${evolutionSummary}${this.formatCommitMessage(commitResult, "finish")}`,
+          "",
+          "**\u2550\u2550\u2550 \u5DE5\u4F5C\u6D41\u5B8C\u6210 \u2550\u2550\u2550**",
+          "\u{1F389} \u5DE5\u4F5C\u6D41\u5DF2\u56DE\u5230\u5F85\u547D\u72B6\u6001",
+          "\u23F3 \u7B49\u5F85\u4E0B\u4E00\u4E2A\u9700\u6C42..."
+        ].join("\n");
       }
-      const evolutionSummary = this.formatEvolutionSummary({
-        reflectRan: true,
-        experimentRan,
-        changedConfigKeys
-      });
-      this.repo.cleanTags();
-      await this.repo.clearAll();
+      await this.persistFinalSummary(finalSummary);
+      const nextStep = commitResult.status === "failed" ? "\u6700\u7EC8commit\u5931\u8D25\uFF0C\u5DE5\u4F5C\u6D41\u4ECD\u505C\u7559\u5728\u6536\u5C3E\u9636\u6BB5\uFF1B\u8BF7\u4FEE\u590D\u540E\u91CD\u65B0\u6267\u884C node flow.js finish" : "\u6700\u7EC8commit\u5C1A\u672A\u5B8C\u6210\uFF0C\u5DE5\u4F5C\u6D41\u4ECD\u505C\u7559\u5728\u6536\u5C3E\u9636\u6BB5\uFF1B\u8BF7\u5904\u7406\u63D0\u4EA4\u8FB9\u754C\u540E\u91CD\u65B0\u6267\u884C node flow.js finish";
       return [
         "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
         "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
@@ -4991,29 +5195,12 @@ ${titles}`;
         stats,
         "",
         finalSummary,
-        `${evolutionSummary}${this.formatCommitMessage(commitResult, "finish")}`,
+        this.formatCommitMessage(commitResult, "finish"),
         "",
-        "**\u2550\u2550\u2550 \u5DE5\u4F5C\u6D41\u5B8C\u6210 \u2550\u2550\u2550**",
-        "\u{1F389} \u5DE5\u4F5C\u6D41\u5DF2\u56DE\u5230\u5F85\u547D\u72B6\u6001",
-        "\u23F3 \u7B49\u5F85\u4E0B\u4E00\u4E2A\u9700\u6C42..."
+        "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
+        "\u26A0\uFE0F " + nextStep
       ].join("\n");
-    }
-    await this.persistFinalSummary(finalSummary);
-    const nextStep = commitResult.status === "failed" ? "\u6700\u7EC8commit\u5931\u8D25\uFF0C\u5DE5\u4F5C\u6D41\u4ECD\u505C\u7559\u5728\u6536\u5C3E\u9636\u6BB5\uFF1B\u8BF7\u4FEE\u590D\u540E\u91CD\u65B0\u6267\u884C node flow.js finish" : "\u6700\u7EC8commit\u5C1A\u672A\u5B8C\u6210\uFF0C\u5DE5\u4F5C\u6D41\u4ECD\u505C\u7559\u5728\u6536\u5C3E\u9636\u6BB5\uFF1B\u8BF7\u5904\u7406\u63D0\u4EA4\u8FB9\u754C\u540E\u91CD\u65B0\u6267\u884C node flow.js finish";
-    return [
-      "**\u2550\u2550\u2550 \u9A8C\u8BC1\u7ED3\u679C \u2550\u2550\u2550**",
-      "\u2705 \u9A8C\u8BC1\u901A\u8FC7",
-      verifySummary,
-      "",
-      "**\u2550\u2550\u2550 \u5B8C\u6210\u7EDF\u8BA1 \u2550\u2550\u2550**",
-      stats,
-      "",
-      finalSummary,
-      this.formatCommitMessage(commitResult, "finish"),
-      "",
-      "**\u2550\u2550\u2550 \u4E0B\u4E00\u6B65 \u2550\u2550\u2550**",
-      "\u26A0\uFE0F " + nextStep
-    ].join("\n");
+    });
   }
   /** 计算 config 变更的键列表（浅比较，键名排序） */
   diffConfigKeys(before, after) {
@@ -5074,6 +5261,13 @@ ${titles}`;
     await this.repo.lock();
     try {
       const data = await this.requireProgress();
+      if (data.status === "reconciling") {
+        throw new Error("\u5F53\u524D\u5DE5\u4F5C\u6D41\u5904\u4E8E reconciling \u72B6\u6001\uFF0C\u9700\u5148\u5904\u7406\u5F85\u63A5\u7BA1\u4EFB\u52A1\u540E\u518D rollback");
+      }
+      const activeTasks = data.tasks.filter((taskEntry) => taskEntry.status === "active");
+      if (activeTasks.length > 0) {
+        throw new Error(`\u4ECD\u6709 active \u4EFB\u52A1\u5728\u8FD0\u884C\uFF1A${activeTasks.map((taskEntry) => taskEntry.id).join(", ")}\uFF0C\u8BF7\u5148\u5B8C\u6210\u6216\u6062\u590D\u540E\u518D rollback`);
+      }
       const task = data.tasks.find((t) => t.id === id);
       if (!task) throw new Error(`\u4EFB\u52A1 ${id} \u4E0D\u5B58\u5728`);
       if (task.status !== "done") throw new Error(`\u4EFB\u52A1 ${id} \u72B6\u6001\u4E3A ${task.status}\uFF0C\u53EA\u80FD\u56DE\u6EDA\u5DF2\u5B8C\u6210\u7684\u4EFB\u52A1`);
@@ -5081,41 +5275,48 @@ ${titles}`;
       if (err) return `\u56DE\u6EDA\u5931\u8D25: ${err}`;
       const newTasks = reopenRollbackBranch(data.tasks, id);
       const newData = { ...data, status: "running", current: null, tasks: newTasks };
+      const resetTaskIds = newTasks.filter((taskEntry, index) => taskEntry.status === "pending" && data.tasks[index].status !== "pending").map((taskEntry) => taskEntry.id);
+      for (const taskId of resetTaskIds) {
+        await replaceOwnedFilesForTask(this.repo.projectRoot(), taskId, []);
+        await this.repo.clearTaskPulse(taskId);
+      }
+      await clearReconcileState(this.repo.projectRoot());
       await this.repo.saveProgress(newData);
       await this.updateSummary(newData);
-      const resetCount = newTasks.filter(
-        (taskEntry, index) => taskEntry.status === "pending" && data.tasks[index].status !== "pending"
-      ).length;
-      return `\u5DF2\u56DE\u6EDA\u5230\u4EFB\u52A1 ${id} \u4E4B\u524D\u7684\u72B6\u6001\uFF0C${resetCount} \u4E2A\u4EFB\u52A1\u91CD\u7F6E\u4E3A pending`;
+      return `\u5DF2\u56DE\u6EDA\u5230\u4EFB\u52A1 ${id} \u4E4B\u524D\u7684\u72B6\u6001\uFF0C${resetTaskIds.length} \u4E2A\u4EFB\u52A1\u91CD\u7F6E\u4E3A pending`;
     } finally {
       await this.repo.unlock();
     }
   }
   /** abort: 中止工作流，清理 .workflow/ 目录 */
   async abort() {
-    const data = await this.repo.loadProgress();
-    if (!data) return "\u65E0\u6D3B\u8DC3\u5DE5\u4F5C\u6D41\uFF0C\u65E0\u9700\u4E2D\u6B62";
-    await this.repo.saveProgress({ ...data, status: "aborted" });
-    await this.repo.cleanupInjections();
-    await this.repo.clearAll();
-    return `\u5DE5\u4F5C\u6D41 "${data.name}" \u5DF2\u4E2D\u6B62\uFF0C.workflow/ \u5DF2\u6E05\u7406`;
+    return this.withRepoLock(async () => {
+      const data = await this.repo.loadProgress();
+      if (!data) return "\u65E0\u6D3B\u8DC3\u5DE5\u4F5C\u6D41\uFF0C\u65E0\u9700\u4E2D\u6B62";
+      await this.repo.saveProgress({ ...data, status: "aborted" });
+      await this.repo.cleanupInjections();
+      await this.repo.clearAll();
+      return `\u5DE5\u4F5C\u6D41 "${data.name}" \u5DF2\u4E2D\u6B62\uFF0C.workflow/ \u5DF2\u6E05\u7406`;
+    });
   }
   /** rollbackEvolution: 从进化日志恢复历史 config */
   async rollbackEvolution(index) {
-    const evolutions = await this.repo.loadEvolutions();
-    if (!evolutions.length) return "\u65E0\u8FDB\u5316\u65E5\u5FD7";
-    if (index < 0 || index >= evolutions.length) return `\u7D22\u5F15\u8D8A\u754C\uFF0C\u6709\u6548\u8303\u56F4: 0-${evolutions.length - 1}`;
-    const target = evolutions[index];
-    const configBefore = await this.repo.loadConfig();
-    await this.repo.saveConfig(target.configBefore);
-    await this.repo.saveEvolution({
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      workflowName: `rollback-to-${index}`,
-      configBefore,
-      configAfter: target.configBefore,
-      suggestions: ["\u624B\u52A8\u56DE\u6EDA"]
+    return this.withRepoLock(async () => {
+      const evolutions = await this.repo.loadEvolutions();
+      if (!evolutions.length) return "\u65E0\u8FDB\u5316\u65E5\u5FD7";
+      if (index < 0 || index >= evolutions.length) return `\u7D22\u5F15\u8D8A\u754C\uFF0C\u6709\u6548\u8303\u56F4: 0-${evolutions.length - 1}`;
+      const target = evolutions[index];
+      const configBefore = await this.repo.loadConfig();
+      await this.repo.saveConfig(target.configBefore);
+      await this.repo.saveEvolution({
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        workflowName: `rollback-to-${index}`,
+        configBefore,
+        configAfter: target.configBefore,
+        suggestions: ["\u624B\u52A8\u56DE\u6EDA"]
+      });
+      return `\u5DF2\u56DE\u6EDA\u5230\u8FDB\u5316\u70B9 ${index}\uFF08${target.timestamp}\uFF09`;
     });
-    return `\u5DF2\u56DE\u6EDA\u5230\u8FDB\u5316\u70B9 ${index}\uFF08${target.timestamp}\uFF09`;
   }
   /** recall: 查询相关记忆 */
   async recall(query) {
@@ -5317,24 +5518,16 @@ var import_promises11 = require("readline/promises");
 function isTTY() {
   return process.stdin.isTTY === true;
 }
-function readStdinIfPiped(timeout = 3e4) {
-  if (isTTY()) return Promise.resolve("");
-  return new Promise((resolve2, reject) => {
-    const chunks = [];
-    const timer = setTimeout(() => {
-      process.stdin.destroy();
-      resolve2("");
-    }, timeout);
-    process.stdin.on("data", (c) => chunks.push(c));
-    process.stdin.on("end", () => {
-      clearTimeout(timer);
-      resolve2(Buffer.concat(chunks).toString("utf-8"));
-    });
-    process.stdin.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-  });
+async function readAllFromStream(input) {
+  const chunks = [];
+  for await (const chunk of input) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
+async function readStdinIfPiped() {
+  if (isTTY()) return "";
+  return readAllFromStream(process.stdin);
 }
 var CLIENT_OPTIONS = [
   { key: "1", value: "claude", label: "Claude Code", detail: "\u9ED8\u8BA4\u751F\u6210 CLAUDE.md + .claude/settings.json" },
@@ -5381,15 +5574,21 @@ var RELEASE_URL = "https://github.com/" + REPO_OWNER + "/" + REPO_NAME + "/relea
 function getCachePath() {
   return (0, import_path12.join)(process.cwd(), ".flowpilot", "update-cache.json");
 }
-function getCurrentVersion() {
+function extractVersionFromSource(content) {
+  const match = content.match(/\/\/ FLOWPILOT_VERSION:\s*(\d+\.\d+\.\d+)/);
+  return match?.[1] ?? null;
+}
+function resolveExecutablePath(explicitPath) {
+  const candidate = explicitPath ?? process.argv[1];
+  if (candidate && (0, import_fs4.existsSync)(candidate)) return candidate;
+  return null;
+}
+function getCurrentVersion(executablePath) {
   try {
-    const cwd = process.cwd();
-    const flowPath = (0, import_fs4.existsSync)((0, import_path12.join)(cwd, "flow.js")) ? (0, import_path12.join)(cwd, "flow.js") : (0, import_path12.join)(cwd, "dist", "flow.js");
-    if ((0, import_fs4.existsSync)(flowPath)) {
-      const content = (0, import_fs4.readFileSync)(flowPath, "utf-8");
-      const match = content.match(/\/\/ FLOWPILOT_VERSION:\s*(\d+\.\d+\.\d+)/);
-      if (match) return match[1];
-    }
+    const flowPath = resolveExecutablePath(executablePath);
+    if (!flowPath) return "0.0.0";
+    const content = (0, import_fs4.readFileSync)(flowPath, "utf-8");
+    return extractVersionFromSource(content) ?? "0.0.0";
   } catch {
   }
   return "0.0.0";
@@ -5436,14 +5635,14 @@ function saveCache2(cache) {
   if (!(0, import_fs4.existsSync)(dir)) (0, import_fs4.mkdirSync)(dir, { recursive: true });
   (0, import_fs4.writeFileSync)(cachePath3, JSON.stringify(cache, null, 2));
 }
-function checkForUpdate() {
-  const currentVersion = getCurrentVersion();
+function checkForUpdate(executablePath) {
+  const currentVersion = getCurrentVersion(executablePath);
   if (currentVersion === "0.0.0") return null;
   const cache = loadCache2();
   const now = Date.now();
   if (cache && now - cache.checkedAt < CACHE_DURATION_MS) {
     if (compareVersions(currentVersion, cache.latestVersion)) {
-      return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + cache.latestVersion + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u9879\u76EE\u6839\u76EE\u5F55\u8FD0\u884C: curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
+      return "\u{1F4A1} \u53D1\u73B0\u65B0\u7248\u672C v" + cache.latestVersion + " (\u5F53\u524D v" + currentVersion + ")\uFF0C\u8FD0\u884C: curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
     }
     return null;
   }
@@ -5459,12 +5658,61 @@ function checkForUpdate() {
   };
   saveCache2(newCache);
   if (hasUpdate) {
-    return "\u{1F504} \u53D1\u73B0\u65B0\u7248\u672C: v" + latestInfo.version + " (\u5F53\u524D: v" + currentVersion + ")\n   \u4E0B\u8F7D: " + RELEASE_URL + "\n   \u9879\u76EE\u6839\u76EE\u5F55\u8FD0\u884C: curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
+    return "\u{1F4A1} \u53D1\u73B0\u65B0\u7248\u672C v" + latestInfo.version + " (\u5F53\u524D v" + currentVersion + ")\uFF0C\u8FD0\u884C: curl -L " + RELEASE_URL + "/latest/download/flow.js -o flow.js";
   }
   return null;
 }
 
 // src/interfaces/cli.ts
+var UPDATE_SKIP_COMMANDS = /* @__PURE__ */ new Set(["version", "help", "-h", "--help", "resume", "status", "recall"]);
+var VALID_TASK_TYPES = /* @__PURE__ */ new Set(["frontend", "backend", "general"]);
+function looksLikePathToken(token) {
+  return /^[./~]/.test(token) || token.includes("/") || token.includes("\\") || token.includes(".");
+}
+function resolveProjectFile(pathArg) {
+  const filePath = (0, import_path13.resolve)(pathArg);
+  if ((0, import_path13.relative)(process.cwd(), filePath).startsWith("..")) throw new Error("--file \u8DEF\u5F84\u4E0D\u80FD\u8D85\u51FA\u9879\u76EE\u76EE\u5F55");
+  return filePath;
+}
+async function parseDetailAndFiles(rest, readInput) {
+  const detailTokens = [];
+  const files = [];
+  let detailFromFile = null;
+  for (let i = 1; i < rest.length; i++) {
+    const token = rest[i];
+    if (token === "--file") {
+      const fileArg = rest[i + 1];
+      if (!fileArg) throw new Error("\u9700\u8981 --file \u8DEF\u5F84");
+      detailFromFile = (0, import_fs5.readFileSync)(resolveProjectFile(fileArg), "utf-8");
+      i += 1;
+      continue;
+    }
+    if (token === "--files") {
+      let sawFile = false;
+      while (i + 1 < rest.length && !rest[i + 1].startsWith("--")) {
+        const candidate = rest[i + 1];
+        if (sawFile && !looksLikePathToken(candidate)) {
+          detailTokens.push(...rest.slice(i + 1));
+          i = rest.length;
+          break;
+        }
+        files.push(candidate);
+        sawFile = true;
+        i += 1;
+      }
+      continue;
+    }
+    if (token.startsWith("--")) {
+      continue;
+    }
+    detailTokens.push(token);
+  }
+  const detail = detailFromFile ?? (detailTokens.length ? detailTokens.join(" ") : await readInput());
+  return {
+    detail: detail.trim(),
+    ...files.length ? { files } : {}
+  };
+}
 var CLI = class {
   constructor(service2, deps = {}) {
     this.service = service2;
@@ -5478,13 +5726,14 @@ var CLI = class {
       args.splice(verboseIdx, 1);
     }
     const cmd = args[0] || "";
-    const noUpdateCheck = cmd === "version" || cmd === "help" || cmd === "-h" || cmd === "--help" || cmd === "status" || cmd === "recall";
+    const noUpdateCheck = UPDATE_SKIP_COMMANDS.has(cmd);
+    const executablePath = (this.deps.getExecutablePath ?? (() => process.argv[1]))();
     try {
       let output = await this.dispatch(args);
       if (!noUpdateCheck) {
-        const updateMsg = checkForUpdate();
+        const updateMsg = (this.deps.checkForUpdate ?? checkForUpdate)(executablePath);
         if (updateMsg) {
-          output = output + "\n\n" + updateMsg + "\n\u{1F4A1} \u63D0\u793A: \u4E0B\u8F7D\u540E\u8BF7\u8FD0\u884C node flow.js init \u91CD\u65B0\u521D\u59CB\u5316";
+          output = output + " " + updateMsg;
         }
       }
       process.stdout.write(output + "\n");
@@ -5497,14 +5746,9 @@ var CLI = class {
     const [cmd, ...rest] = args;
     const s = this.service;
     if (cmd === "version") {
-      const cwd = process.cwd();
-      const flowPath = (0, import_fs5.existsSync)((0, import_path13.join)(cwd, "flow.js")) ? (0, import_path13.join)(cwd, "flow.js") : (0, import_path13.join)(cwd, "dist", "flow.js");
-      let version = "unknown";
-      if ((0, import_fs5.existsSync)(flowPath)) {
-        const content = (0, import_fs5.readFileSync)(flowPath, "utf-8");
-        const match = content.match(/\/\/ FLOWPILOT_VERSION:\s*(\d+\.\d+\.\d+)/);
-        if (match) version = match[1];
-      }
+      const executablePath = (this.deps.getExecutablePath ?? (() => process.argv[1]))();
+      const version = (this.deps.getCurrentVersion ?? getCurrentVersion)(executablePath);
+      if (version === "0.0.0") return "FlowPilot vunknown";
       return "FlowPilot v" + version;
     }
     switch (cmd) {
@@ -5534,50 +5778,14 @@ var CLI = class {
       case "checkpoint": {
         const id = rest[0];
         if (!id) throw new Error("\u9700\u8981\u4EFB\u52A1ID");
-        const filesIdx = rest.indexOf("--files");
-        const fileIdx = rest.indexOf("--file");
-        let detail;
-        let files;
-        if (filesIdx >= 0) {
-          files = [];
-          for (let i = filesIdx + 1; i < rest.length && !rest[i].startsWith("--"); i++) {
-            files.push(rest[i]);
-          }
-        }
-        if (fileIdx >= 0 && rest[fileIdx + 1]) {
-          const filePath = (0, import_path13.resolve)(rest[fileIdx + 1]);
-          if ((0, import_path13.relative)(process.cwd(), filePath).startsWith("..")) throw new Error("--file \u8DEF\u5F84\u4E0D\u80FD\u8D85\u51FA\u9879\u76EE\u76EE\u5F55");
-          detail = (0, import_fs5.readFileSync)(filePath, "utf-8");
-        } else if (rest.length > 1 && fileIdx < 0 && filesIdx < 0) {
-          detail = rest.slice(1).join(" ");
-        } else {
-          detail = await (this.deps.readStdinIfPiped ?? readStdinIfPiped)();
-        }
-        return await s.checkpoint(id, detail.trim(), files);
+        const parsed = await parseDetailAndFiles(rest, this.deps.readStdinIfPiped ?? readStdinIfPiped);
+        return await s.checkpoint(id, parsed.detail, parsed.files);
       }
       case "adopt": {
         const id = rest[0];
         if (!id) throw new Error("\u9700\u8981\u4EFB\u52A1ID");
-        const filesIdx = rest.indexOf("--files");
-        const fileIdx = rest.indexOf("--file");
-        let detail;
-        let files;
-        if (filesIdx >= 0) {
-          files = [];
-          for (let i = filesIdx + 1; i < rest.length && !rest[i].startsWith("--"); i++) {
-            files.push(rest[i]);
-          }
-        }
-        if (fileIdx >= 0 && rest[fileIdx + 1]) {
-          const filePath = (0, import_path13.resolve)(rest[fileIdx + 1]);
-          if ((0, import_path13.relative)(process.cwd(), filePath).startsWith("..")) throw new Error("--file \u8DEF\u5F84\u4E0D\u80FD\u8D85\u51FA\u9879\u76EE\u76EE\u5F55");
-          detail = (0, import_fs5.readFileSync)(filePath, "utf-8");
-        } else if (rest.length > 1 && fileIdx < 0 && filesIdx < 0) {
-          detail = rest.slice(1).join(" ");
-        } else {
-          detail = await (this.deps.readStdinIfPiped ?? readStdinIfPiped)();
-        }
-        return await s.adopt(id, detail.trim(), files);
+        const parsed = await parseDetailAndFiles(rest, this.deps.readStdinIfPiped ?? readStdinIfPiped);
+        return await s.adopt(id, parsed.detail, parsed.files);
       }
       case "restart": {
         const id = rest[0];
@@ -5650,9 +5858,8 @@ var CLI = class {
       case "add": {
         const typeIdx = rest.indexOf("--type");
         const rawType = typeIdx >= 0 && rest[typeIdx + 1] || "general";
-        const validTypes = /* @__PURE__ */ new Set(["frontend", "backend", "general"]);
-        const type = validTypes.has(rawType) ? rawType : "general";
-        const title = rest.filter((_, i) => i !== typeIdx && i !== typeIdx + 1).join(" ");
+        const type = VALID_TASK_TYPES.has(rawType) ? rawType : "general";
+        const title = rest.filter((_, i) => typeIdx < 0 || i !== typeIdx && i !== typeIdx + 1).join(" ");
         if (!title) throw new Error("\u9700\u8981\u4EFB\u52A1\u63CF\u8FF0");
         return await s.add(title, type);
       }

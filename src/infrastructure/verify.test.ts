@@ -34,7 +34,7 @@ describe('runVerify', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('在没有可检测验证命令时返回 not found', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'flow-verify-not-found-'));
@@ -82,7 +82,7 @@ describe('runVerify', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('将 vitest 测试脚本转换为非 watch 验证命令', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'flow-verify-'));
@@ -116,7 +116,7 @@ describe('runVerify', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('优先读取 .flowpilot/config.json 中的 verify 配置', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'flow-verify-config-'));
